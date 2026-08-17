@@ -1,0 +1,108 @@
+name: Análise de M&A
+
+# Dispara sob demanda: botão "Run workflow" no GitHub, ou via API
+# (é isso que vira o botão "Analisar" no site da Fase 7 mais pra frente).
+on:
+  workflow_dispatch:
+    inputs:
+      deal_id:
+        description: "UUID do deal a analisar (tabela deals no Supabase)"
+        required: true
+        type: string
+
+jobs:
+  # ---- Agent 00 · Extraction (sequencial — os outros dependem do resultado dele) ----
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar Claude Code
+        run: curl -fsSL https://claude.ai/install.sh | bash
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+      - name: Extrair dados do deal
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DEAL_ID: ${{ inputs.deal_id }}
+        run: python scripts/run_agent.py --agent extraction --deal-id "$DEAL_ID"
+
+  # ---- Os 5 agentes em paralelo — "matrix" é o fan-out nativo do GitHub Actions ----
+  analyze:
+    needs: extract
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false   # um agente falhar não cancela os outros 4 — igual ao "Continue On Fail" do n8n
+      matrix:
+        agent:
+          - complexity
+          - opinion
+          - integration_risks
+          - operational_risks
+          - financial_analysis
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar Claude Code
+        run: curl -fsSL https://claude.ai/install.sh | bash
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+      - name: Rodar agente ${{ matrix.agent }}
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DEAL_ID: ${{ inputs.deal_id }}
+        run: python scripts/run_agent.py --agent "${{ matrix.agent }}" --deal-id "$DEAL_ID"
+
+  # ---- CFO Synthesis — "if: always()" garante que roda mesmo se 1 dos 5 falhou ----
+  # (isso resolve, de um jeito mais simples, o mesmo risco que o Merge node do n8n tinha)
+  synthesize:
+    needs: analyze
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar Claude Code
+        run: curl -fsSL https://claude.ai/install.sh | bash
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+      - name: CFO Synthesis
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DEAL_ID: ${{ inputs.deal_id }}
+        run: python scripts/run_agent.py --agent cfo_synthesis --deal-id "$DEAL_ID"
+
+  # ---- Output Generator (Fase 6) + upload no Microsoft Drive (Fase 5) ----
+  # Placeholder por enquanto — ainda não desenhamos essas duas fases.
+  generate_outputs:
+    needs: synthesize
+    if: always() && needs.synthesize.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+      - name: Gerar Excel + PPT e subir no Microsoft Drive
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          MS_GRAPH_CLIENT_ID: ${{ secrets.MS_GRAPH_CLIENT_ID }}
+          MS_GRAPH_CLIENT_SECRET: ${{ secrets.MS_GRAPH_CLIENT_SECRET }}
+          MS_GRAPH_TENANT_ID: ${{ secrets.MS_GRAPH_TENANT_ID }}
+          DEAL_ID: ${{ inputs.deal_id }}
+        run: python scripts/generate_outputs.py --deal-id "$DEAL_ID"
