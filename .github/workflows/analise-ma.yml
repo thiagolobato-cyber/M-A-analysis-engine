@@ -34,7 +34,6 @@ jobs:
   # ---- Os 5 agentes em paralelo — "matrix" é o fan-out nativo do GitHub Actions ----
   analyze:
     needs: extract
-    if: always()   # roda mesmo se a extração (ainda placeholder) tropeçar
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false   # um agente falhar não cancela os outros 4 — igual ao "Continue On Fail" do n8n
@@ -85,8 +84,8 @@ jobs:
           DEAL_ID: ${{ inputs.deal_id }}
         run: python scripts/run_agent.py --agent cfo_synthesis --deal-id "$DEAL_ID"
 
-  # ---- Output Generator (Fase 6) + upload no Microsoft Drive (Fase 5) ----
-  # Placeholder por enquanto — ainda não desenhamos essas duas fases.
+  # ---- Output Generator (Fase 6) — disponível para download direto no
+  # GitHub Actions até o conector do Microsoft Drive (Fase 5) existir.
   generate_outputs:
     needs: synthesize
     if: always() && needs.synthesize.result == 'success'
@@ -98,12 +97,18 @@ jobs:
           python-version: "3.12"
       - name: Instalar dependências
         run: pip install -r requirements.txt
-      - name: Gerar Excel + PPT e subir no Microsoft Drive
+      - name: Gerar Excel + PPT
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          MS_GRAPH_CLIENT_ID: ${{ secrets.MS_GRAPH_CLIENT_ID }}
-          MS_GRAPH_CLIENT_SECRET: ${{ secrets.MS_GRAPH_CLIENT_SECRET }}
-          MS_GRAPH_TENANT_ID: ${{ secrets.MS_GRAPH_TENANT_ID }}
           DEAL_ID: ${{ inputs.deal_id }}
         run: python scripts/generate_outputs.py --deal-id "$DEAL_ID"
+      - name: Disponibilizar para download (interino, até o Microsoft Drive)
+        uses: actions/upload-artifact@v4
+        with:
+          name: analise-${{ inputs.deal_id }}
+          path: output/
+          retention-days: 90
+      # TODO Fase 5: quando o acesso ao Microsoft Graph existir (Q11),
+      # adicionar aqui um step de upload pro Drive, mantendo o artifact
+      # como fallback ou removendo-o, a critério do Thiago na época.
