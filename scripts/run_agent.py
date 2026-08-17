@@ -22,6 +22,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.request
@@ -94,13 +95,21 @@ def call_claude(system_prompt: str, deal_data: dict, other_outputs: dict | None 
         raise RuntimeError(f"claude -p saiu com erro: {result.stderr}")
 
     # --output-format json do Claude Code envolve a resposta num envelope;
-    # o campo com o texto do agente pode variar de versão — ajustar depois
-    # do primeiro teste real contra o CLI.
+    # o campo com o texto do agente é "result" (confirmado no teste de 17/08).
     raw = json.loads(result.stdout)
     agent_text = raw.get("result", raw.get("content", result.stdout))
 
+    # Modelos frequentemente embrulham JSON em ```json ... ``` mesmo quando
+    # instruídos a responder só com JSON puro — confirmado no teste real de
+    # 17/08 (o agent_text vinha como "```json\n{...}\n```"). Remove antes de
+    # tentar interpretar.
+    cleaned = agent_text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+
     try:
-        return json.loads(agent_text)
+        return json.loads(cleaned)
     except json.JSONDecodeError as e:
         raise RuntimeError(f"Resposta do agente não é um JSON válido: {e}\nResposta bruta: {agent_text[:500]}")
 
