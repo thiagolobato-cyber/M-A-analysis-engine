@@ -348,7 +348,7 @@ async function triggerAnalysis(dealId, btn) {
   btn.textContent = "Disparando...";
   try {
     const { data: { session } } = await sb.auth.getSession();
-    const res = await fetch("/api/trigger-analysis", {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/trigger-analysis`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
