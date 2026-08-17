@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>M&amp;A Analysis Engine</title>
+<link href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+:root{
+  --navy:#0F1727; --coral:#F25461; --coral-strong:#C73B47; --coral-soft:#FDEAEC;
+  --success:#2E7D4F; --success-soft:#E6F2EB;
+  --warn:#B6592A; --warn-soft:#FBEFE5;
+  --danger:#B03A3A; --danger-soft:#FBECEC;
+  --bg:#F9F9F9; --border:#E8E8E6; --text:#141414; --muted:#6A6A68;
+  --sans:"Lato",-apple-system,sans-serif; --mono:"JetBrains Mono",monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:var(--sans);background:var(--bg);color:var(--text);font-size:15px}
+.hidden{display:none !important}
+button{font-family:var(--sans);cursor:pointer;border:none;border-radius:8px;font-weight:700;padding:10px 18px;font-size:14px}
+button.primary{background:var(--navy);color:#fff}
+button.primary:hover{background:#1c2942}
+button.ghost{background:transparent;color:var(--navy);border:1px solid var(--border)}
+button:disabled{opacity:0.5;cursor:not-allowed}
+input,select{font-family:var(--sans);font-size:14px;padding:9px 12px;border:1px solid var(--border);border-radius:8px;width:100%}
+label{font-size:12.5px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;display:block;margin-bottom:5px}
+
+/* ---- Login ---- */
+#login-screen{min-height:100vh;display:flex;align-items:center;justify-content:center}
+.login-card{background:#fff;border:1px solid var(--border);border-radius:16px;padding:40px;width:360px}
+.login-card h1{font-size:22px;margin:0 0 4px}
+.login-card p{color:var(--muted);font-size:13.5px;margin:0 0 24px}
+.field{margin-bottom:14px}
+.error-msg{color:var(--danger);font-size:13px;margin-top:10px}
+
+/* ---- App shell ---- */
+#app-screen{max-width:1100px;margin:0 auto;padding:32px 24px 80px}
+header.topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:32px}
+header.topbar h1{font-size:20px;margin:0;color:var(--navy)}
+header.topbar .user-email{font-size:13px;color:var(--muted);margin-right:14px}
+.toolbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
+
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden;border:1px solid var(--border)}
+th{text-align:left;font-size:11px;text-transform:uppercase;color:var(--muted);padding:10px 14px;border-bottom:1px solid var(--border);background:#FAFAF9}
+td{padding:12px 14px;border-bottom:1px solid var(--border);font-size:14px;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr.deal-row{cursor:pointer}
+tr.deal-row:hover{background:#FAFAF9}
+
+.badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:11.5px;font-weight:700}
+.badge.uploaded{background:#EFEFED;color:var(--muted)}
+.badge.processing{background:var(--warn-soft);color:var(--warn)}
+.badge.completed{background:var(--success-soft);color:var(--success)}
+.badge.error{background:var(--danger-soft);color:var(--danger)}
+.badge.GO{background:var(--success-soft);color:var(--success)}
+.badge.NO-GO{background:var(--danger-soft);color:var(--danger)}
+.badge.CONDITIONAL_GO{background:var(--warn-soft);color:var(--warn)}
+
+/* ---- Modal ---- */
+.modal-backdrop{position:fixed;inset:0;background:rgba(15,23,39,0.5);display:flex;align-items:center;justify-content:center;z-index:50;padding:20px}
+.modal{background:#fff;border-radius:16px;padding:28px;width:100%;max-width:640px;max-height:85vh;overflow-y:auto}
+.modal h2{margin:0 0 4px;font-size:19px}
+.modal .sub{color:var(--muted);font-size:13px;margin:0 0 20px}
+.modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}
+.file-list{font-size:13px;color:var(--muted);margin-top:8px}
+
+/* ---- Detail view ---- */
+.detail-section{margin-bottom:22px}
+.detail-section h3{font-size:13px;text-transform:uppercase;color:var(--muted);letter-spacing:.03em;margin:0 0 8px}
+.detail-section p{font-size:14px;line-height:1.6;margin:0 0 8px}
+.detail-section ul{margin:0;padding-left:18px;font-size:14px;line-height:1.7}
+.callout{background:#FAFAF9;border:1px solid var(--border);border-radius:10px;padding:14px 16px;font-size:13.5px;color:var(--muted)}
+.callout.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
+.download-link{display:inline-block;margin-top:10px;color:var(--coral-strong);font-weight:700;font-size:13.5px;text-decoration:none}
+.download-link:hover{text-decoration:underline}
+
+.empty-state{text-align:center;padding:60px 20px;color:var(--muted)}
+</style>
+</head>
+<body>
+
+<!-- ============ LOGIN ============ -->
+<div id="login-screen">
+  <div class="login-card">
+    <h1>M&amp;A Analysis Engine</h1>
+    <p>BHub · uso interno</p>
+    <div class="field">
+      <label>E-mail</label>
+      <input type="email" id="login-email" autocomplete="username" />
+    </div>
+    <div class="field">
+      <label>Senha</label>
+      <input type="password" id="login-password" autocomplete="current-password" />
+    </div>
+    <button class="primary" id="login-btn" style="width:100%">Entrar</button>
+    <div class="error-msg hidden" id="login-error"></div>
+  </div>
+</div>
+
+<!-- ============ APP ============ -->
+<div id="app-screen" class="hidden">
+  <header class="topbar">
+    <h1>M&amp;A Analysis Engine<span style="color:var(--coral)">.</span></h1>
+    <div>
+      <span class="user-email" id="user-email"></span>
+      <button class="ghost" id="logout-btn">Sair</button>
+    </div>
+  </header>
+
+  <div class="toolbar">
+    <div></div>
+    <button class="primary" id="new-deal-btn">+ Novo Deal</button>
+  </div>
+
+  <table id="deals-table">
+    <thead>
+      <tr><th>Deal</th><th>Status</th><th>Complexidade</th><th>Recomendação</th><th>Criado em</th><th></th></tr>
+    </thead>
+    <tbody id="deals-tbody"></tbody>
+  </table>
+  <div class="empty-state hidden" id="empty-state">Nenhum deal ainda. Clique em "+ Novo Deal" para começar.</div>
+</div>
+
+<!-- ============ MODAL: novo deal ============ -->
+<div class="modal-backdrop hidden" id="new-deal-modal">
+  <div class="modal">
+    <h2>Novo deal</h2>
+    <p class="sub">Cria o registro e envia os arquivos. A extração e análise rodam depois.</p>
+    <div class="field">
+      <label>Nome do deal</label>
+      <input type="text" id="new-deal-name" placeholder="Ex: Escritório Fulano de Tal LTDA" />
+    </div>
+    <div class="field">
+      <label>Arquivos (formulário, DRE, Balancete...)</label>
+      <input type="file" id="new-deal-files" multiple />
+      <div class="file-list" id="new-deal-file-list"></div>
+    </div>
+    <div class="error-msg hidden" id="new-deal-error"></div>
+    <div class="modal-actions">
+      <button class="ghost" id="new-deal-cancel">Cancelar</button>
+      <button class="primary" id="new-deal-submit">Criar deal</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: detalhe do deal ============ -->
+<div class="modal-backdrop hidden" id="detail-modal">
+  <div class="modal" style="max-width:760px">
+    <h2 id="detail-title"></h2>
+    <p class="sub" id="detail-sub"></p>
+    <div id="detail-body"></div>
+    <div class="modal-actions">
+      <button class="ghost" id="detail-close">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------
+// Configuração — a anon key é segura para expor no cliente (é o design
+// dela: RLS decide o que cada usuário pode ver/fazer, ver seção 7 da
+// arquitetura.html). A service_role key NUNCA entra aqui.
+// ---------------------------------------------------------------------
+const SUPABASE_URL = "https://alapimvqkppfqbidxsvd.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFsYXBpbXZxa3BwZnFiaWR4c3ZkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY2OTkxMTIsImV4cCI6MjEwMjI3NTExMn0.5IkoO6qIXTaX2lhN_wS7Eqno1n_8QD9QlgeP8dOZrsM";
+
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const $ = (id) => document.getElementById(id);
+
+// ---------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------
+async function checkSession() {
+  const { data: { session } } = await sb.auth.getSession();
+  if (session) {
+    showApp(session);
+  } else {
+    showLogin();
+  }
+}
+
+function showLogin() {
+  $("login-screen").classList.remove("hidden");
+  $("app-screen").classList.add("hidden");
+}
+
+function showApp(session) {
+  $("login-screen").classList.add("hidden");
+  $("app-screen").classList.remove("hidden");
+  $("user-email").textContent = session.user.email;
+  loadDeals();
+}
+
+$("login-btn").addEventListener("click", async () => {
+  const email = $("login-email").value.trim();
+  const password = $("login-password").value;
+  $("login-error").classList.add("hidden");
+  const { data, error } = await sb.auth.signInWithPassword({ email, password });
+  if (error) {
+    $("login-error").textContent = "E-mail ou senha incorretos.";
+    $("login-error").classList.remove("hidden");
+    return;
+  }
+  showApp(data.session);
+});
+
+$("logout-btn").addEventListener("click", async () => {
+  await sb.auth.signOut();
+  showLogin();
+});
+
+// ---------------------------------------------------------------------
+// Deals — listar
+// ---------------------------------------------------------------------
+async function loadDeals() {
+  const { data: deals, error } = await sb
+    .from("deals")
+    .select("*")
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    console.error(error);
+    return;
+  }
+
+  const tbody = $("deals-tbody");
+  tbody.innerHTML = "";
+  $("empty-state").classList.toggle("hidden", deals.length > 0);
+
+  for (const deal of deals) {
+    const [{ data: agentRuns }, { data: synthRuns }] = await Promise.all([
+      sb.from("agent_runs").select("*, agent_versions(agent_id, agents(name))").eq("deal_id", deal.id),
+      sb.from("synthesis_runs").select("*").eq("deal_id", deal.id).order("created_at", { ascending: false }).limit(1),
+    ]);
+
+    const complexityRun = (agentRuns || []).find(r => r.agent_versions?.agents?.name === "complexity");
+    const complexity = complexityRun?.output?.classificacao || "—";
+    const synth = (synthRuns || [])[0];
+    const recommendation = synth?.recommendation;
+
+    const tr = document.createElement("tr");
+    tr.className = "deal-row";
+    tr.innerHTML = `
+      <td>${escapeHtml(deal.name)}</td>
+      <td><span class="badge ${deal.status}">${deal.status}</span></td>
+      <td>${escapeHtml(complexity)}</td>
+      <td>${recommendation ? `<span class="badge ${recommendation}">${recommendation}</span>` : "—"}</td>
+      <td>${new Date(deal.created_at).toLocaleDateString("pt-BR")}</td>
+      <td></td>
+    `;
+    const actionTd = tr.querySelector("td:last-child");
+
+    if (deal.status === "uploaded") {
+      const btn = document.createElement("button");
+      btn.className = "primary";
+      btn.textContent = "Analisar";
+      btn.onclick = (e) => { e.stopPropagation(); triggerAnalysis(deal.id, btn); };
+      actionTd.appendChild(btn);
+    }
+
+    tr.addEventListener("click", () => openDetail(deal, agentRuns || [], synth));
+    tbody.appendChild(tr);
+  }
+}
+
+function escapeHtml(s) {
+  const d = document.createElement("div");
+  d.textContent = s ?? "";
+  return d.innerHTML;
+}
+
+// ---------------------------------------------------------------------
+// Criar deal + upload de arquivos
+// ---------------------------------------------------------------------
+$("new-deal-btn").addEventListener("click", () => {
+  $("new-deal-name").value = "";
+  $("new-deal-files").value = "";
+  $("new-deal-file-list").textContent = "";
+  $("new-deal-error").classList.add("hidden");
+  $("new-deal-modal").classList.remove("hidden");
+});
+$("new-deal-cancel").addEventListener("click", () => $("new-deal-modal").classList.add("hidden"));
+
+$("new-deal-files").addEventListener("change", (e) => {
+  const names = Array.from(e.target.files).map(f => f.name).join(", ");
+  $("new-deal-file-list").textContent = names;
+});
+
+$("new-deal-submit").addEventListener("click", async () => {
+  const name = $("new-deal-name").value.trim();
+  const files = Array.from($("new-deal-files").files);
+  const errEl = $("new-deal-error");
+  errEl.classList.add("hidden");
+
+  if (!name) {
+    errEl.textContent = "Dê um nome para o deal.";
+    errEl.classList.remove("hidden");
+    return;
+  }
+
+  const submitBtn = $("new-deal-submit");
+  submitBtn.disabled = true;
+  submitBtn.textContent = "Criando...";
+
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    const { data: deal, error: dealError } = await sb
+      .from("deals")
+      .insert({ name, created_by: session.user.id })
+      .select()
+      .single();
+    if (dealError) throw dealError;
+
+    for (const file of files) {
+      const path = `${deal.id}/${file.name}`;
+      const { error: uploadError } = await sb.storage.from("deal-files").upload(path, file);
+      if (uploadError) throw uploadError;
+
+      const { error: fileRowError } = await sb.from("files").insert({
+        deal_id: deal.id,
+        file_type: "other",
+        original_filename: file.name,
+        storage_ref: path,
+        uploaded_by: session.user.id,
+      });
+      if (fileRowError) throw fileRowError;
+    }
+
+    $("new-deal-modal").classList.add("hidden");
+    loadDeals();
+  } catch (err) {
+    console.error(err);
+    errEl.textContent = "Erro ao criar o deal: " + (err.message || "erro desconhecido");
+    errEl.classList.remove("hidden");
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = "Criar deal";
+  }
+});
+
+// ---------------------------------------------------------------------
+// Disparar análise (via serverless function — nunca expõe token no cliente)
+// ---------------------------------------------------------------------
+async function triggerAnalysis(dealId, btn) {
+  btn.disabled = true;
+  btn.textContent = "Disparando...";
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    const res = await fetch("/api/trigger-analysis", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ deal_id: dealId }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || `HTTP ${res.status}`);
+    }
+    await sb.from("deals").update({ status: "processing" }).eq("id", dealId);
+    loadDeals();
+  } catch (err) {
+    alert("Não foi possível disparar a análise: " + err.message);
+    btn.disabled = false;
+    btn.textContent = "Analisar";
+  }
+}
+
+// ---------------------------------------------------------------------
+// Detalhe do deal
+// ---------------------------------------------------------------------
+function agentOutput(agentRuns, name) {
+  const run = agentRuns.find(r => r.agent_versions?.agents?.name === name);
+  return run?.output || null;
+}
+
+function openDetail(deal, agentRuns, synth) {
+  $("detail-title").textContent = deal.name;
+  $("detail-sub").textContent = `Status: ${deal.status}`;
+
+  const complexity = agentOutput(agentRuns, "complexity");
+  const opinion = agentOutput(agentRuns, "opinion");
+  const integration = agentOutput(agentRuns, "integration_risks");
+  const operational = agentOutput(agentRuns, "operational_risks");
+  const financial = agentOutput(agentRuns, "financial_analysis");
+
+  let html = "";
+
+  if (!synth && agentRuns.length === 0) {
+    html += `<div class="callout warn">Este deal ainda não foi analisado. Como a extração real de Excel/DRE ainda não está pronta (só o placeholder), o botão "Analisar" pode não completar até essa parte estar implementada — fale com o time técnico.</div>`;
+  }
+
+  if (synth) {
+    html += `<div class="detail-section">
+      <h3>Recomendação final</h3>
+      <p><span class="badge ${synth.recommendation}">${synth.recommendation}</span></p>
+      <p>${escapeHtml(synth.output?.sumario_executivo || "")}</p>
+    </div>`;
+  }
+  if (complexity) {
+    html += `<div class="detail-section"><h3>Complexidade</h3><p>${escapeHtml(complexity.classificacao)}</p></div>`;
+  }
+  if (opinion) {
+    html += `<div class="detail-section"><h3>Parecer do time</h3><p>${escapeHtml(opinion.parecer_do_time || "")}</p></div>`;
+  }
+  if (financial) {
+    html += `<div class="detail-section"><h3>Análise financeira</h3><p>Resultado: ${escapeHtml(financial.resultado || "n/d")}</p></div>`;
+  }
+  if (integration || operational) {
+    html += `<div class="detail-section"><h3>Riscos</h3><ul>`;
+    for (const item of (integration?.riscos_integracao || [])) html += `<li>${escapeHtml(item)}</li>`;
+    for (const item of (operational?.riscos_operacionais || [])) html += `<li>${escapeHtml(item)}</li>`;
+    html += `</ul></div>`;
+  }
+
+  $("detail-body").innerHTML = html;
+
+  // Link de download (Fase 6 — via GitHub Actions Artifact até o Drive existir)
+  sb.from("outputs").select("*").eq("deal_id", deal.id).order("created_at", { ascending: false }).limit(1)
+    .then(({ data }) => {
+      if (data && data[0]) {
+        const link = document.createElement("a");
+        link.href = data[0].excel_ref;
+        link.target = "_blank";
+        link.className = "download-link";
+        link.textContent = "↓ Baixar Excel / PPT (GitHub Actions)";
+        $("detail-body").appendChild(link);
+      }
+    });
+
+  $("detail-modal").classList.remove("hidden");
+}
+$("detail-close").addEventListener("click", () => $("detail-modal").classList.add("hidden"));
+
+checkSession();
+</script>
+</body>
+</html>
