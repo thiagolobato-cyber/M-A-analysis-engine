@@ -99,19 +99,42 @@ def call_claude(system_prompt: str, deal_data: dict, other_outputs: dict | None 
     raw = json.loads(result.stdout)
     agent_text = raw.get("result", raw.get("content", result.stdout))
 
-    # Modelos frequentemente embrulham JSON em ```json ... ``` mesmo quando
-    # instruídos a responder só com JSON puro — confirmado no teste real de
-    # 17/08 (o agent_text vinha como "```json\n{...}\n```"). Remove antes de
-    # tentar interpretar.
-    cleaned = agent_text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
+    parsed = _extract_json(agent_text)
+    if parsed is None:
+        raise RuntimeError(f"Resposta do agente não é um JSON válido.\nResposta bruta: {agent_text[:500]}")
+    return parsed
 
+
+def _extract_json(text: str) -> dict | None:
+    """Extrai JSON de uma resposta de LLM, tolerando variações comuns:
+    JSON puro, cercado em ```json ... ```, cercado em ``` ... ``` simples,
+    ou com texto explicativo antes/depois do bloco. Tenta na ordem do mais
+    estrito pro mais tolerante."""
+    text = text.strip()
+
+    # 1. JSON puro
     try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Resposta do agente não é um JSON válido: {e}\nResposta bruta: {agent_text[:500]}")
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Bloco cercado em ```json ... ``` ou ``` ... ```, em qualquer parte do texto
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fence_match:
+        try:
+            return json.loads(fence_match.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Último recurso: do primeiro "{" ao último "}" no texto inteiro
+    first, last = text.find("{"), text.rfind("}")
+    if first != -1 and last != -1 and last > first:
+        try:
+            return json.loads(text[first:last + 1])
+        except json.JSONDecodeError:
+            pass
+
+    return None
 
 
 def compute_input_hash(deal_id: str, agent_version_id: str, checksum: str) -> str:
