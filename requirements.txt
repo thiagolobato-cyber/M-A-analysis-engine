@@ -1,4 +1,4 @@
-# Fase 4: nenhuma dependência externa ainda — run_agent.py só usa a
-# biblioteca padrão do Python (urllib, json, hashlib, subprocess).
-# A Fase 6 (Excel/PPT) e a Fase 5 (Microsoft Graph) vão adicionar
-# bibliotecas aqui quando forem desenhadas.
+# Fase 4: run_agent.py só usa biblioteca padrão do Python.
+# Fase 6: geração de Excel/PPT.
+openpyxl==3.1.5
+python-pptx==1.0.2
