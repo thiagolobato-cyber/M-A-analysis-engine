@@ -8,7 +8,8 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
 :root{
-  --navy:#0F1727; --coral:#F25461; --coral-strong:#C73B47; --coral-soft:#FDEAEC;
+  --navy:#0F1727; --navy-soft:#1c2942;
+  --coral:#F25461; --coral-strong:#C73B47; --coral-soft:#FDEAEC;
   --success:#2E7D4F; --success-soft:#E6F2EB;
   --warn:#B6592A; --warn-soft:#FBEFE5;
   --danger:#B03A3A; --danger-soft:#FBECEC;
@@ -20,26 +21,46 @@ body{margin:0;font-family:var(--sans);background:var(--bg);color:var(--text);fon
 .hidden{display:none !important}
 button{font-family:var(--sans);cursor:pointer;border:none;border-radius:8px;font-weight:700;padding:10px 18px;font-size:14px}
 button.primary{background:var(--navy);color:#fff}
-button.primary:hover{background:#1c2942}
+button.primary:hover{background:var(--navy-soft)}
+button.danger{background:var(--danger);color:#fff}
+button.danger:hover{background:#8f2e2e}
 button.ghost{background:transparent;color:var(--navy);border:1px solid var(--border)}
+button.ghost:hover{border-color:#c8c8c6}
 button:disabled{opacity:0.5;cursor:not-allowed}
-input,select{font-family:var(--sans);font-size:14px;padding:9px 12px;border:1px solid var(--border);border-radius:8px;width:100%}
+button.icon-btn{background:transparent;color:var(--muted);padding:6px 8px;font-size:13px}
+button.icon-btn:hover{color:var(--danger)}
+input,select,textarea{font-family:var(--sans);font-size:14px;padding:9px 12px;border:1px solid var(--border);border-radius:8px;width:100%}
+textarea{font-family:var(--mono);font-size:13px;line-height:1.6}
 label{font-size:12.5px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;display:block;margin-bottom:5px}
 
 /* ---- Login ---- */
-#login-screen{min-height:100vh;display:flex;align-items:center;justify-content:center}
+#login-screen{min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg)}
 .login-card{background:#fff;border:1px solid var(--border);border-radius:16px;padding:40px;width:360px}
 .login-card h1{font-size:22px;margin:0 0 4px}
 .login-card p{color:var(--muted);font-size:13.5px;margin:0 0 24px}
 .field{margin-bottom:14px}
 .error-msg{color:var(--danger);font-size:13px;margin-top:10px}
 
-/* ---- App shell ---- */
-#app-screen{max-width:1100px;margin:0 auto;padding:32px 24px 80px}
-header.topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:32px}
-header.topbar h1{font-size:20px;margin:0;color:var(--navy)}
-header.topbar .user-email{font-size:13px;color:var(--muted);margin-right:14px}
-.toolbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
+/* ---- App shell: sidebar + content ---- */
+#app-screen{display:flex;min-height:100vh}
+.sidebar{width:240px;flex-shrink:0;background:var(--navy);color:rgba(255,255,255,.85);display:flex;flex-direction:column;padding:24px 16px;position:sticky;top:0;height:100vh}
+.sidebar .brand{font-size:17px;font-weight:900;color:#fff;padding:0 8px 20px;border-bottom:1px solid rgba(255,255,255,.1);margin-bottom:16px}
+.sidebar .brand .dot{color:var(--coral)}
+.nav-section-label{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:rgba(255,255,255,.4);font-weight:700;padding:0 8px;margin:16px 0 6px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:8px;font-size:14px;color:rgba(255,255,255,.8);cursor:pointer;margin-bottom:2px;position:relative}
+.nav-item:hover{background:rgba(255,255,255,.06);color:#fff}
+.nav-item.active{background:rgba(242,84,97,.18);color:var(--coral);font-weight:700}
+.sidebar-footer{margin-top:auto;padding-top:16px;border-top:1px solid rgba(255,255,255,.1);font-size:12.5px}
+.sidebar-footer .email{color:rgba(255,255,255,.75);word-break:break-all;margin-bottom:4px}
+.role-badge{display:inline-block;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;padding:2px 7px;border-radius:999px;margin-bottom:10px}
+.role-badge.admin{background:var(--coral-soft);color:var(--coral-strong)}
+.role-badge.analyst{background:rgba(255,255,255,.1);color:rgba(255,255,255,.7)}
+
+.content{flex:1;padding:36px 40px;max-width:1200px}
+.page-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px}
+.page-header h1{font-size:24px;margin:0 0 4px;color:var(--navy)}
+.page-header p{color:var(--muted);font-size:13.5px;margin:0}
+.toolbar-actions{display:flex;gap:10px}
 
 table{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden;border:1px solid var(--border)}
 th{text-align:left;font-size:11px;text-transform:uppercase;color:var(--muted);padding:10px 14px;border-bottom:1px solid var(--border);background:#FAFAF9}
@@ -47,6 +68,7 @@ td{padding:12px 14px;border-bottom:1px solid var(--border);font-size:14px;vertic
 tr:last-child td{border-bottom:none}
 tr.deal-row{cursor:pointer}
 tr.deal-row:hover{background:#FAFAF9}
+.row-actions{display:flex;gap:6px;justify-content:flex-end}
 
 .badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:11.5px;font-weight:700}
 .badge.uploaded{background:#EFEFED;color:var(--muted)}
@@ -57,25 +79,32 @@ tr.deal-row:hover{background:#FAFAF9}
 .badge.NO-GO{background:var(--danger-soft);color:var(--danger)}
 .badge.CONDITIONAL_GO{background:var(--warn-soft);color:var(--warn)}
 
-/* ---- Modal ---- */
 .modal-backdrop{position:fixed;inset:0;background:rgba(15,23,39,0.5);display:flex;align-items:center;justify-content:center;z-index:50;padding:20px}
 .modal{background:#fff;border-radius:16px;padding:28px;width:100%;max-width:640px;max-height:85vh;overflow-y:auto}
+.modal.wide{max-width:820px}
 .modal h2{margin:0 0 4px;font-size:19px}
 .modal .sub{color:var(--muted);font-size:13px;margin:0 0 20px}
 .modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}
 .file-list{font-size:13px;color:var(--muted);margin-top:8px}
 
-/* ---- Detail view ---- */
 .detail-section{margin-bottom:22px}
 .detail-section h3{font-size:13px;text-transform:uppercase;color:var(--muted);letter-spacing:.03em;margin:0 0 8px}
 .detail-section p{font-size:14px;line-height:1.6;margin:0 0 8px}
 .detail-section ul{margin:0;padding-left:18px;font-size:14px;line-height:1.7}
 .callout{background:#FAFAF9;border:1px solid var(--border);border-radius:10px;padding:14px 16px;font-size:13.5px;color:var(--muted)}
 .callout.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
-.download-link{display:inline-block;margin-top:10px;color:var(--coral-strong);font-weight:700;font-size:13.5px;text-decoration:none}
+.callout.danger{background:var(--danger-soft);color:var(--danger);border-color:transparent}
+.download-link{display:inline-block;margin-right:16px;color:var(--coral-strong);font-weight:700;font-size:13.5px;text-decoration:none}
 .download-link:hover{text-decoration:underline}
 
+.agent-list{display:grid;grid-template-columns:220px 1fr;gap:20px}
+.agent-item{padding:10px 12px;border-radius:8px;cursor:pointer;font-size:13.5px;margin-bottom:4px}
+.agent-item:hover{background:#FAFAF9}
+.agent-item.active{background:var(--coral-soft);color:var(--coral-strong);font-weight:700}
+.version-pill{font-family:var(--mono);font-size:10.5px;background:#F4F4F2;border:1px solid var(--border);padding:1px 6px;border-radius:4px;color:var(--muted);margin-left:6px}
+
 .empty-state{text-align:center;padding:60px 20px;color:var(--muted)}
+select.role-select{width:auto;padding:6px 10px;font-size:13px}
 </style>
 </head>
 <body>
@@ -100,29 +129,25 @@ tr.deal-row:hover{background:#FAFAF9}
 
 <!-- ============ APP ============ -->
 <div id="app-screen" class="hidden">
-  <header class="topbar">
-    <h1>M&amp;A Analysis Engine<span style="color:var(--coral)">.</span></h1>
-    <div>
-      <span class="user-email" id="user-email"></span>
-      <button class="ghost" id="logout-btn">Sair</button>
-    </div>
-  </header>
+  <aside class="sidebar">
+    <div class="brand">M&amp;A Engine<span class="dot">.</span></div>
 
-  <div class="toolbar">
-    <div></div>
-    <div style="display:flex;gap:10px">
-      <button class="ghost" id="refresh-btn">↻ Atualizar</button>
-      <button class="primary" id="new-deal-btn">+ Novo Deal</button>
-    </div>
-  </div>
+    <div class="nav-section-label">Operação</div>
+    <div class="nav-item" data-page="deals">📁 Deals</div>
 
-  <table id="deals-table">
-    <thead>
-      <tr><th>Deal</th><th>Status</th><th>Complexidade</th><th>Recomendação</th><th>Criado em</th><th></th></tr>
-    </thead>
-    <tbody id="deals-tbody"></tbody>
-  </table>
-  <div class="empty-state hidden" id="empty-state">Nenhum deal ainda. Clique em "+ Novo Deal" para começar.</div>
+    <div class="nav-section-label admin-only hidden">Governança</div>
+    <div class="nav-item admin-only hidden" data-page="agents">🤖 Agentes</div>
+    <div class="nav-item admin-only hidden" data-page="admin">👥 Administração</div>
+    <div class="nav-item admin-only hidden" data-page="activity">📋 Atividade</div>
+
+    <div class="sidebar-footer">
+      <div class="role-badge" id="sidebar-role"></div>
+      <div class="email" id="sidebar-email"></div>
+      <button class="ghost" id="logout-btn" style="width:100%;background:transparent;color:rgba(255,255,255,.75);border-color:rgba(255,255,255,.2)">Sair</button>
+    </div>
+  </aside>
+
+  <main class="content" id="content"></main>
 </div>
 
 <!-- ============ MODAL: novo deal ============ -->
@@ -159,115 +184,29 @@ tr.deal-row:hover{background:#FAFAF9}
   </div>
 </div>
 
+<!-- ============ MODAL: confirmar exclusão ============ -->
+<div class="modal-backdrop hidden" id="confirm-modal">
+  <div class="modal" style="max-width:440px">
+    <h2 id="confirm-title">Confirmar</h2>
+    <p class="sub" id="confirm-body"></p>
+    <div class="modal-actions">
+      <button class="ghost" id="confirm-cancel">Cancelar</button>
+      <button class="danger" id="confirm-ok">Excluir</button>
+    </div>
+  </div>
+</div>
+
 <script>
-// ---------------------------------------------------------------------
-// Configuração — a anon key é segura para expor no cliente (é o design
-// dela: RLS decide o que cada usuário pode ver/fazer, ver seção 7 da
-// arquitetura.html). A service_role key NUNCA entra aqui.
-// ---------------------------------------------------------------------
 const SUPABASE_URL = "https://alapimvqkppfqbidxsvd.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFsYXBpbXZxa3BwZnFiaWR4c3ZkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY2OTkxMTIsImV4cCI6MjEwMjI3NTExMn0.5IkoO6qIXTaX2lhN_wS7Eqno1n_8QD9QlgeP8dOZrsM";
-
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
 const $ = (id) => document.getElementById(id);
 
-// ---------------------------------------------------------------------
-// Auth
-// ---------------------------------------------------------------------
-async function checkSession() {
-  const { data: { session } } = await sb.auth.getSession();
-  if (session) {
-    showApp(session);
-  } else {
-    showLogin();
-  }
-}
-
-function showLogin() {
-  $("login-screen").classList.remove("hidden");
-  $("app-screen").classList.add("hidden");
-}
-
-function showApp(session) {
-  $("login-screen").classList.add("hidden");
-  $("app-screen").classList.remove("hidden");
-  $("user-email").textContent = session.user.email;
-  loadDeals();
-}
-
-$("login-btn").addEventListener("click", async () => {
-  const email = $("login-email").value.trim();
-  const password = $("login-password").value;
-  $("login-error").classList.add("hidden");
-  const { data, error } = await sb.auth.signInWithPassword({ email, password });
-  if (error) {
-    $("login-error").textContent = "E-mail ou senha incorretos.";
-    $("login-error").classList.remove("hidden");
-    return;
-  }
-  showApp(data.session);
-});
-
-$("logout-btn").addEventListener("click", async () => {
-  await sb.auth.signOut();
-  showLogin();
-});
+let state = { page: "deals", profile: null };
 
 // ---------------------------------------------------------------------
-// Deals — listar
+// Helpers
 // ---------------------------------------------------------------------
-async function loadDeals() {
-  const { data: deals, error } = await sb
-    .from("deals")
-    .select("*")
-    .order("created_at", { ascending: false });
-
-  if (error) {
-    console.error(error);
-    return;
-  }
-
-  const tbody = $("deals-tbody");
-  tbody.innerHTML = "";
-  $("empty-state").classList.toggle("hidden", deals.length > 0);
-
-  for (const deal of deals) {
-    const [{ data: agentRuns }, { data: synthRuns }] = await Promise.all([
-      sb.from("agent_runs").select("*, agent_versions(agent_id, agents(name))").eq("deal_id", deal.id),
-      sb.from("synthesis_runs").select("*").eq("deal_id", deal.id).order("created_at", { ascending: false }).limit(1),
-    ]);
-
-    const complexityRun = (agentRuns || []).find(r => r.agent_versions?.agents?.name === "complexity");
-    const complexity = complexityRun?.output?.classificacao || "—";
-    const synth = (synthRuns || [])[0];
-    const recommendation = synth?.recommendation;
-
-    const tr = document.createElement("tr");
-    tr.className = "deal-row";
-    tr.innerHTML = `
-      <td>${escapeHtml(deal.name)}</td>
-      <td><span class="badge ${deal.status}">${deal.status}</span><br/><span style="font-size:11px;color:var(--muted)">${relativeTime(deal.updated_at)}</span></td>
-      <td>${escapeHtml(complexity)}</td>
-      <td>${recommendation ? `<span class="badge ${recommendation}">${recommendation}</span>` : "—"}</td>
-      <td>${new Date(deal.created_at).toLocaleDateString("pt-BR")}</td>
-      <td></td>
-    `;
-    const actionTd = tr.querySelector("td:last-child");
-
-    if (["uploaded", "processing", "error"].includes(deal.status)) {
-      const btn = document.createElement("button");
-      btn.className = "primary";
-      btn.textContent = deal.status === "uploaded" ? "Analisar" : "Reprocessar";
-      btn.onclick = (e) => { e.stopPropagation(); triggerAnalysis(deal.id, btn); };
-      actionTd.appendChild(btn);
-    }
-
-    tr.addEventListener("click", () => openDetail(deal, agentRuns || [], synth));
-    tbody.appendChild(tr);
-  }
-}
-
 function escapeHtml(s) {
   const d = document.createElement("div");
   d.textContent = s ?? "";
@@ -285,37 +224,205 @@ function relativeTime(isoString) {
   return `há ${Math.round(h / 24)} d`;
 }
 
-// Nomes de arquivo reais têm acento, apóstrofo, espaço (ex: "DRE's.xlsx",
-// "Balanços 2026.xlsx") — o Storage do Supabase não aceita isso na chave
-// do objeto. Sanitiza só o caminho salvo; o nome original fica preservado
-// em files.original_filename para exibição.
 function sanitizeFilename(name) {
   const lastDot = name.lastIndexOf(".");
   const base = lastDot > 0 ? name.slice(0, lastDot) : name;
   const ext = lastDot > 0 ? name.slice(lastDot + 1) : "";
-  const cleanBase = base
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // remove acentos
-    .replace(/[^a-zA-Z0-9._-]/g, "_");                  // troca o resto por _
+  const cleanBase = base.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9._-]/g, "_");
   return ext ? `${cleanBase}.${ext}` : cleanBase;
 }
 
-// ---------------------------------------------------------------------
-// Criar deal + upload de arquivos
-// ---------------------------------------------------------------------
-$("refresh-btn").addEventListener("click", () => loadDeals());
+async function logActivity(action, deal_id, details) {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) return;
+  await sb.from("activity_log").insert({
+    user_id: session.user.id, user_email: session.user.email, action, deal_id: deal_id || null, details: details || null,
+  });
+}
 
-$("new-deal-btn").addEventListener("click", () => {
+function confirmDialog(title, body) {
+  return new Promise((resolve) => {
+    $("confirm-title").textContent = title;
+    $("confirm-body").textContent = body;
+    $("confirm-modal").classList.remove("hidden");
+    const onOk = () => { cleanup(); resolve(true); };
+    const onCancel = () => { cleanup(); resolve(false); };
+    function cleanup() {
+      $("confirm-modal").classList.add("hidden");
+      $("confirm-ok").removeEventListener("click", onOk);
+      $("confirm-cancel").removeEventListener("click", onCancel);
+    }
+    $("confirm-ok").addEventListener("click", onOk);
+    $("confirm-cancel").addEventListener("click", onCancel);
+  });
+}
+
+async function callEdgeFunction(name, body) {
+  const { data: { session } } = await sb.auth.getSession();
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/${name}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY, "Authorization": `Bearer ${session.access_token}` },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  return json;
+}
+
+// ---------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------
+async function checkSession() {
+  const { data: { session } } = await sb.auth.getSession();
+  if (session) await showApp(session); else showLogin();
+}
+
+function showLogin() {
+  $("login-screen").classList.remove("hidden");
+  $("app-screen").classList.add("hidden");
+}
+
+async function showApp(session) {
+  $("login-screen").classList.add("hidden");
+  $("app-screen").classList.remove("hidden");
+
+  const { data: profile } = await sb.from("profiles").select("*").eq("id", session.user.id).single();
+  state.profile = profile;
+
+  $("sidebar-email").textContent = session.user.email;
+  $("sidebar-role").textContent = profile?.role || "analyst";
+  $("sidebar-role").className = "role-badge " + (profile?.role || "analyst");
+
+  document.querySelectorAll(".admin-only").forEach(el => el.classList.toggle("hidden", profile?.role !== "admin"));
+
+  renderPage("deals");
+}
+
+$("login-btn").addEventListener("click", async () => {
+  const email = $("login-email").value.trim();
+  const password = $("login-password").value;
+  $("login-error").classList.add("hidden");
+  const { data, error } = await sb.auth.signInWithPassword({ email, password });
+  if (error) {
+    $("login-error").textContent = "E-mail ou senha incorretos.";
+    $("login-error").classList.remove("hidden");
+    return;
+  }
+  await showApp(data.session);
+});
+
+$("logout-btn").addEventListener("click", async () => {
+  await sb.auth.signOut();
+  showLogin();
+});
+
+document.querySelectorAll(".nav-item[data-page]").forEach(el => {
+  el.addEventListener("click", () => renderPage(el.dataset.page));
+});
+
+function renderPage(page) {
+  state.page = page;
+  document.querySelectorAll(".nav-item[data-page]").forEach(el => el.classList.toggle("active", el.dataset.page === page));
+  if (page === "deals") renderDealsPage();
+  else if (page === "agents") renderAgentsPage();
+  else if (page === "admin") renderAdminPage();
+  else if (page === "activity") renderActivityPage();
+}
+
+// =======================================================================
+// PÁGINA: DEALS
+// =======================================================================
+async function renderDealsPage() {
+  const content = $("content");
+  content.innerHTML = `
+    <div class="page-header">
+      <div><h1>Deals</h1><p>Histórico de análises de M&amp;A</p></div>
+      <div class="toolbar-actions">
+        <button class="ghost" id="refresh-btn">↻ Atualizar</button>
+        <button class="primary" id="new-deal-btn">+ Novo Deal</button>
+      </div>
+    </div>
+    <table id="deals-table">
+      <thead><tr><th>Deal</th><th>Status</th><th>Complexidade</th><th>Recomendação</th><th>Criado em</th><th></th></tr></thead>
+      <tbody id="deals-tbody"></tbody>
+    </table>
+    <div class="empty-state hidden" id="empty-state">Nenhum deal ainda. Clique em "+ Novo Deal" para começar.</div>
+  `;
+  $("refresh-btn").addEventListener("click", loadDeals);
+  $("new-deal-btn").addEventListener("click", openNewDealModal);
+  loadDeals();
+}
+
+async function loadDeals() {
+  const { data: deals, error } = await sb.from("deals").select("*").order("created_at", { ascending: false });
+  if (error) { console.error(error); return; }
+
+  const tbody = $("deals-tbody");
+  tbody.innerHTML = "";
+  $("empty-state").classList.toggle("hidden", deals.length > 0);
+  const isAdmin = state.profile?.role === "admin";
+
+  for (const deal of deals) {
+    const [{ data: agentRuns }, { data: synthRuns }] = await Promise.all([
+      sb.from("agent_runs").select("*, agent_versions(agent_id, agents(name))").eq("deal_id", deal.id),
+      sb.from("synthesis_runs").select("*").eq("deal_id", deal.id).order("created_at", { ascending: false }).limit(1),
+    ]);
+    const complexityRun = (agentRuns || []).find(r => r.agent_versions?.agents?.name === "complexity");
+    const complexity = complexityRun?.output?.classificacao || "—";
+    const synth = (synthRuns || [])[0];
+    const recommendation = synth?.recommendation;
+
+    const tr = document.createElement("tr");
+    tr.className = "deal-row";
+    tr.innerHTML = `
+      <td>${escapeHtml(deal.name)}</td>
+      <td><span class="badge ${deal.status}">${deal.status}</span><br/><span style="font-size:11px;color:var(--muted)">${relativeTime(deal.updated_at)}</span></td>
+      <td>${escapeHtml(complexity)}</td>
+      <td>${recommendation ? `<span class="badge ${recommendation}">${recommendation}</span>` : "—"}</td>
+      <td>${new Date(deal.created_at).toLocaleDateString("pt-BR")}</td>
+      <td><div class="row-actions"></div></td>
+    `;
+    const actionsDiv = tr.querySelector(".row-actions");
+
+    if (["uploaded", "processing", "error"].includes(deal.status)) {
+      const btn = document.createElement("button");
+      btn.className = "primary";
+      btn.textContent = deal.status === "uploaded" ? "Analisar" : "Reprocessar";
+      btn.onclick = (e) => { e.stopPropagation(); triggerAnalysis(deal.id, btn); };
+      actionsDiv.appendChild(btn);
+    }
+    if (isAdmin) {
+      const delBtn = document.createElement("button");
+      delBtn.className = "icon-btn";
+      delBtn.title = "Excluir deal";
+      delBtn.textContent = "🗑";
+      delBtn.onclick = async (e) => {
+        e.stopPropagation();
+        const ok = await confirmDialog("Excluir deal?", `"${deal.name}" e todas as análises associadas serão apagadas. Essa ação não pode ser desfeita.`);
+        if (!ok) return;
+        const { error } = await sb.from("deals").delete().eq("id", deal.id);
+        if (error) { alert("Não foi possível excluir: " + error.message); return; }
+        await logActivity("delete_deal", deal.id, { name: deal.name });
+        loadDeals();
+      };
+      actionsDiv.appendChild(delBtn);
+    }
+
+    tr.addEventListener("click", () => openDetail(deal, agentRuns || [], synth));
+    tbody.appendChild(tr);
+  }
+}
+
+function openNewDealModal() {
   $("new-deal-name").value = "";
   $("new-deal-files").value = "";
   $("new-deal-file-list").textContent = "";
   $("new-deal-error").classList.add("hidden");
   $("new-deal-modal").classList.remove("hidden");
-});
+}
 $("new-deal-cancel").addEventListener("click", () => $("new-deal-modal").classList.add("hidden"));
-
 $("new-deal-files").addEventListener("change", (e) => {
-  const names = Array.from(e.target.files).map(f => f.name).join(", ");
-  $("new-deal-file-list").textContent = names;
+  $("new-deal-file-list").textContent = Array.from(e.target.files).map(f => f.name).join(", ");
 });
 
 $("new-deal-submit").addEventListener("click", async () => {
@@ -323,41 +430,26 @@ $("new-deal-submit").addEventListener("click", async () => {
   const files = Array.from($("new-deal-files").files);
   const errEl = $("new-deal-error");
   errEl.classList.add("hidden");
-
-  if (!name) {
-    errEl.textContent = "Dê um nome para o deal.";
-    errEl.classList.remove("hidden");
-    return;
-  }
+  if (!name) { errEl.textContent = "Dê um nome para o deal."; errEl.classList.remove("hidden"); return; }
 
   const submitBtn = $("new-deal-submit");
   submitBtn.disabled = true;
   submitBtn.textContent = "Criando...";
-
   try {
     const { data: { session } } = await sb.auth.getSession();
-    const { data: deal, error: dealError } = await sb
-      .from("deals")
-      .insert({ name, created_by: session.user.id })
-      .select()
-      .single();
+    const { data: deal, error: dealError } = await sb.from("deals").insert({ name, created_by: session.user.id }).select().single();
     if (dealError) throw dealError;
 
     for (const file of files) {
       const path = `${deal.id}/${sanitizeFilename(file.name)}`;
       const { error: uploadError } = await sb.storage.from("deal-files").upload(path, file);
       if (uploadError) throw uploadError;
-
       const { error: fileRowError } = await sb.from("files").insert({
-        deal_id: deal.id,
-        file_type: "other",
-        original_filename: file.name,
-        storage_ref: path,
-        uploaded_by: session.user.id,
+        deal_id: deal.id, file_type: "other", original_filename: file.name, storage_ref: path, uploaded_by: session.user.id,
       });
       if (fileRowError) throw fileRowError;
     }
-
+    await logActivity("create_deal", deal.id, { name, num_files: files.length });
     $("new-deal-modal").classList.add("hidden");
     loadDeals();
   } catch (err) {
@@ -370,28 +462,13 @@ $("new-deal-submit").addEventListener("click", async () => {
   }
 });
 
-// ---------------------------------------------------------------------
-// Disparar análise (via serverless function — nunca expõe token no cliente)
-// ---------------------------------------------------------------------
 async function triggerAnalysis(dealId, btn) {
   btn.disabled = true;
   btn.textContent = "Disparando...";
   try {
-    const { data: { session } } = await sb.auth.getSession();
-    const res = await fetch(`${SUPABASE_URL}/functions/v1/trigger-analysis`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "apikey": SUPABASE_ANON_KEY,
-        "Authorization": `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({ deal_id: dealId }),
-    });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error(body.error || `HTTP ${res.status}`);
-    }
+    await callEdgeFunction("trigger-analysis", { deal_id: dealId });
     await sb.from("deals").update({ status: "processing" }).eq("id", dealId);
+    await logActivity("trigger_analysis", dealId);
     loadDeals();
   } catch (err) {
     alert("Não foi possível disparar a análise: " + err.message);
@@ -400,15 +477,12 @@ async function triggerAnalysis(dealId, btn) {
   }
 }
 
-// ---------------------------------------------------------------------
-// Detalhe do deal
-// ---------------------------------------------------------------------
 function agentOutput(agentRuns, name) {
-  const run = agentRuns.find(r => r.agent_versions?.agents?.name === name);
-  return run?.output || null;
+  return agentRuns.find(r => r.agent_versions?.agents?.name === name)?.output || null;
 }
 
 function openDetail(deal, agentRuns, synth) {
+  logActivity("view_deal", deal.id, { name: deal.name });
   $("detail-title").textContent = deal.name;
   $("detail-sub").textContent = `Status: ${deal.status}`;
 
@@ -419,47 +493,29 @@ function openDetail(deal, agentRuns, synth) {
   const financial = agentOutput(agentRuns, "financial_analysis");
 
   let html = "";
-
   if (!synth && agentRuns.length === 0) {
-    html += `<div class="callout warn">Este deal ainda não foi analisado. Como a extração real de Excel/DRE ainda não está pronta (só o placeholder), o botão "Analisar" pode não completar até essa parte estar implementada — fale com o time técnico.</div>`;
+    html += `<div class="callout warn">Este deal ainda não foi analisado.</div>`;
   }
-
   if (synth) {
-    html += `<div class="detail-section">
-      <h3>Recomendação final</h3>
-      <p><span class="badge ${synth.recommendation}">${synth.recommendation}</span></p>
-      <p>${escapeHtml(synth.output?.sumario_executivo || "")}</p>
-    </div>`;
+    html += `<div class="detail-section"><h3>Recomendação final</h3><p><span class="badge ${synth.recommendation}">${synth.recommendation}</span></p><p>${escapeHtml(synth.output?.sumario_executivo || "")}</p></div>`;
   }
-  if (complexity) {
-    html += `<div class="detail-section"><h3>Complexidade</h3><p>${escapeHtml(complexity.classificacao)}</p></div>`;
-  }
-  if (opinion) {
-    html += `<div class="detail-section"><h3>Parecer do time</h3><p>${escapeHtml(opinion.parecer_do_time || "")}</p></div>`;
-  }
-  if (financial) {
-    html += `<div class="detail-section"><h3>Análise financeira</h3><p>Resultado: ${escapeHtml(financial.resultado || "n/d")}</p></div>`;
-  }
+  if (complexity) html += `<div class="detail-section"><h3>Complexidade</h3><p>${escapeHtml(complexity.classificacao)}</p></div>`;
+  if (opinion) html += `<div class="detail-section"><h3>Parecer do time</h3><p>${escapeHtml(opinion.parecer_do_time || "")}</p></div>`;
+  if (financial) html += `<div class="detail-section"><h3>Análise financeira</h3><p>Resultado: ${escapeHtml(financial.resultado || "n/d")}</p></div>`;
   if (integration || operational) {
     html += `<div class="detail-section"><h3>Riscos</h3><ul>`;
     for (const item of (integration?.riscos_integracao || [])) html += `<li>${escapeHtml(item)}</li>`;
     for (const item of (operational?.riscos_operacionais || [])) html += `<li>${escapeHtml(item)}</li>`;
     html += `</ul></div>`;
   }
-
   $("detail-body").innerHTML = html;
 
-  // Link de download real — Excel/PPT ficam no Storage do Supabase; gera
-  // um signed URL na hora (o bucket é privado, não tem link público fixo).
   sb.from("outputs").select("*").eq("deal_id", deal.id).order("created_at", { ascending: false }).limit(1)
     .then(async ({ data }) => {
       if (!data || !data[0]) return;
       const row = data[0];
       const links = document.createElement("div");
       links.style.marginTop = "10px";
-      links.style.display = "flex";
-      links.style.gap = "16px";
-
       for (const [label, ref] of [["↓ Baixar Excel", row.excel_ref], ["↓ Baixar PPT", row.ppt_ref]]) {
         if (!ref) continue;
         const { data: signed, error } = await sb.storage.from("deal-outputs").createSignedUrl(ref, 300);
@@ -468,6 +524,7 @@ function openDetail(deal, agentRuns, synth) {
         link.href = signed.signedUrl;
         link.className = "download-link";
         link.textContent = label;
+        link.onclick = () => logActivity("download_output", deal.id, { file: ref });
         links.appendChild(link);
       }
       $("detail-body").appendChild(links);
@@ -476,6 +533,162 @@ function openDetail(deal, agentRuns, synth) {
   $("detail-modal").classList.remove("hidden");
 }
 $("detail-close").addEventListener("click", () => $("detail-modal").classList.add("hidden"));
+
+// =======================================================================
+// PÁGINA: AGENTES (admin)
+// =======================================================================
+async function renderAgentsPage() {
+  const content = $("content");
+  content.innerHTML = `
+    <div class="page-header"><div><h1>Agentes</h1><p>Prompts versionados — cada edição cria uma versão nova, nunca sobrescreve</p></div></div>
+    <div class="agent-list">
+      <div id="agent-nav"></div>
+      <div id="agent-editor"><p class="callout">Selecione um agente à esquerda.</p></div>
+    </div>
+  `;
+  const { data: agents } = await sb.from("agents").select("*").order("name");
+  const nav = $("agent-nav");
+  for (const agent of agents) {
+    const item = document.createElement("div");
+    item.className = "agent-item";
+    item.textContent = agent.name;
+    item.onclick = () => {
+      document.querySelectorAll(".agent-item").forEach(el => el.classList.remove("active"));
+      item.classList.add("active");
+      loadAgentEditor(agent);
+    };
+    nav.appendChild(item);
+  }
+}
+
+async function loadAgentEditor(agent) {
+  const editor = $("agent-editor");
+  editor.innerHTML = "<p>Carregando...</p>";
+
+  const { data: versions } = await sb.from("agent_versions").select("*").eq("agent_id", agent.id).order("created_at", { ascending: false });
+  const activeVersion = versions.find(v => v.active) || versions[0];
+  const { data: prompts } = await sb.from("agent_prompts").select("*").eq("agent_version_id", activeVersion.id);
+  const promptText = prompts?.[0]?.system_prompt || "(sem prompt gravado)";
+
+  editor.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div><strong>${agent.name}</strong> <span class="version-pill">${activeVersion.version}</span> <span class="version-pill">${activeVersion.model}</span></div>
+    </div>
+    <textarea id="prompt-textarea" rows="20">${escapeHtml(promptText)}</textarea>
+    <div class="error-msg hidden" id="agent-save-error"></div>
+    <div class="modal-actions" style="justify-content:flex-start;margin-top:12px">
+      <button class="primary" id="agent-save-btn">Salvar nova versão</button>
+    </div>
+    <h3 style="margin-top:24px;font-size:12px;text-transform:uppercase;color:var(--muted)">Histórico de versões</h3>
+    <table style="margin-top:8px">
+      <thead><tr><th>Versão</th><th>Ativa</th><th>Modelo</th><th>Criada em</th></tr></thead>
+      <tbody>
+        ${versions.map(v => `<tr><td>${v.version}</td><td>${v.active ? "✓" : ""}</td><td>${v.model}</td><td>${new Date(v.created_at).toLocaleString("pt-BR")}</td></tr>`).join("")}
+      </tbody>
+    </table>
+  `;
+
+  $("agent-save-btn").addEventListener("click", async () => {
+    const btn = $("agent-save-btn");
+    const errEl = $("agent-save-error");
+    errEl.classList.add("hidden");
+    btn.disabled = true;
+    btn.textContent = "Salvando...";
+    try {
+      const newPrompt = $("prompt-textarea").value;
+      const result = await callEdgeFunction("save-agent-prompt", { agent_name: agent.name, system_prompt: newPrompt, model: activeVersion.model });
+      alert(`Nova versão criada: ${result.version}`);
+      loadAgentEditor(agent);
+    } catch (err) {
+      errEl.textContent = "Erro ao salvar: " + err.message;
+      errEl.classList.remove("hidden");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Salvar nova versão";
+    }
+  });
+}
+
+// =======================================================================
+// PÁGINA: ADMINISTRAÇÃO (admin)
+// =======================================================================
+async function renderAdminPage() {
+  const content = $("content");
+  content.innerHTML = `
+    <div class="page-header"><div><h1>Administração</h1><p>Papéis de acesso do time</p></div></div>
+    <div class="callout" style="margin-bottom:16px">Para criar uma conta nova, use o painel do Supabase (Authentication → Add user). Aqui você só ajusta o papel de quem já tem conta.</div>
+    <table>
+      <thead><tr><th>E-mail</th><th>Papel</th><th>Desde</th></tr></thead>
+      <tbody id="admin-tbody"></tbody>
+    </table>
+  `;
+  const { data: profiles } = await sb.from("profiles").select("*").order("email");
+  const tbody = $("admin-tbody");
+  const { data: { session } } = await sb.auth.getSession();
+
+  for (const p of profiles) {
+    const tr = document.createElement("tr");
+    const isSelf = p.id === session.user.id;
+    tr.innerHTML = `
+      <td>${escapeHtml(p.email)}${isSelf ? " <span style='color:var(--muted);font-size:12px'>(você)</span>" : ""}</td>
+      <td></td>
+      <td>${new Date(p.created_at).toLocaleDateString("pt-BR")}</td>
+    `;
+    const roleTd = tr.querySelectorAll("td")[1];
+    const select = document.createElement("select");
+    select.className = "role-select";
+    select.innerHTML = `<option value="analyst">Analyst (leitor)</option><option value="admin">Admin (leitor + editor)</option>`;
+    select.value = p.role;
+    select.disabled = isSelf;
+    select.onchange = async () => {
+      const newRole = select.value;
+      try {
+        await callEdgeFunction("update-user-role", { user_id: p.id, new_role: newRole });
+        renderAdminPage();
+      } catch (err) {
+        alert("Erro ao trocar papel: " + err.message);
+        select.value = p.role;
+      }
+    };
+    roleTd.appendChild(select);
+    tbody.appendChild(tr);
+  }
+}
+
+// =======================================================================
+// PÁGINA: ATIVIDADE (admin)
+// =======================================================================
+const ACTION_LABELS = {
+  create_deal: "criou o deal", view_deal: "abriu o deal", delete_deal: "excluiu o deal",
+  trigger_analysis: "disparou análise em", download_output: "baixou arquivo de",
+  change_role: "alterou papel de acesso", edit_prompt: "editou prompt do agente",
+};
+
+async function renderActivityPage() {
+  const content = $("content");
+  content.innerHTML = `
+    <div class="page-header"><div><h1>Atividade</h1><p>Quem fez o quê, e quando — últimas 100 ações</p></div></div>
+    <table>
+      <thead><tr><th>Quando</th><th>Quem</th><th>Ação</th><th>Detalhe</th></tr></thead>
+      <tbody id="activity-tbody"></tbody>
+    </table>
+  `;
+  const { data: logs } = await sb.from("activity_log").select("*").order("created_at", { ascending: false }).limit(100);
+  const tbody = $("activity-tbody");
+  for (const log of (logs || [])) {
+    const tr = document.createElement("tr");
+    const detail = log.action === "edit_prompt" ? log.details?.agent_name
+                 : log.action === "change_role" ? `novo papel: ${log.details?.new_role}`
+                 : log.details?.name || log.details?.file || "";
+    tr.innerHTML = `
+      <td style="font-size:13px;color:var(--muted)">${new Date(log.created_at).toLocaleString("pt-BR")}</td>
+      <td>${escapeHtml(log.user_email || "")}</td>
+      <td>${ACTION_LABELS[log.action] || log.action}</td>
+      <td style="color:var(--muted);font-size:13px">${escapeHtml(detail)}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
 
 checkSession();
 </script>
