@@ -188,6 +188,12 @@ def main():
     supabase_request("POST", table, row)
     print(f"[{args.agent}] concluído e gravado em {table}.")
 
+    # O CFO Synthesis é o último passo da análise em si (Output Generator é
+    # depois, separado) — é o momento certo de marcar o deal como concluído.
+    if args.agent == "cfo_synthesis":
+        supabase_request("PATCH", f"deals?id=eq.{args.deal_id}", {"status": "completed"})
+        print("deal marcado como completed.")
+
 
 if __name__ == "__main__":
     main()
