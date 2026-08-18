@@ -489,6 +489,31 @@ def build_pptx(bundle: dict, path: str):
     print(f"PPT salvo: {path}")
 
 
+def record_output_link(deal_id: str, synthesis_run_id: str | None):
+    """Grava em public.outputs um link direto pro Artifact desta execução do
+    GitHub Actions — é a entrega interina até o Microsoft Drive (Fase 5)
+    existir. GITHUB_REPOSITORY e GITHUB_RUN_ID são variáveis automáticas do
+    Actions, não precisam ser configuradas como secret."""
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    run_id = os.environ.get("GITHUB_RUN_ID")
+    if not repo or not run_id:
+        print("Fora do GitHub Actions (teste local) — não grava outputs.")
+        return
+    run_url = f"https://github.com/{repo}/actions/runs/{run_id}"
+    body = {
+        "deal_id": deal_id,
+        "synthesis_run_id": synthesis_run_id,
+        "excel_ref": run_url,
+        "ppt_ref": run_url,
+    }
+    url = os.environ["SUPABASE_URL"].rstrip("/") + "/rest/v1/outputs"
+    key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+    headers = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method="POST")
+    with urllib.request.urlopen(req) as resp:
+        print(f"outputs gravado: {resp.status}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--deal-id", required=True)
@@ -501,3 +526,4 @@ if __name__ == "__main__":
     pptx_path = f"output/{args.deal_id}_executivo.pptx"
     build_excel(bundle, excel_path)
     build_pptx(bundle, pptx_path)
+    record_output_link(args.deal_id, (bundle.get("synthesis") or {}).get("id"))
