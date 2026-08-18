@@ -271,6 +271,20 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
+// Nomes de arquivo reais têm acento, apóstrofo, espaço (ex: "DRE's.xlsx",
+// "Balanços 2026.xlsx") — o Storage do Supabase não aceita isso na chave
+// do objeto. Sanitiza só o caminho salvo; o nome original fica preservado
+// em files.original_filename para exibição.
+function sanitizeFilename(name) {
+  const lastDot = name.lastIndexOf(".");
+  const base = lastDot > 0 ? name.slice(0, lastDot) : name;
+  const ext = lastDot > 0 ? name.slice(lastDot + 1) : "";
+  const cleanBase = base
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // remove acentos
+    .replace(/[^a-zA-Z0-9._-]/g, "_");                  // troca o resto por _
+  return ext ? `${cleanBase}.${ext}` : cleanBase;
+}
+
 // ---------------------------------------------------------------------
 // Criar deal + upload de arquivos
 // ---------------------------------------------------------------------
@@ -314,7 +328,7 @@ $("new-deal-submit").addEventListener("click", async () => {
     if (dealError) throw dealError;
 
     for (const file of files) {
-      const path = `${deal.id}/${file.name}`;
+      const path = `${deal.id}/${sanitizeFilename(file.name)}`;
       const { error: uploadError } = await sb.storage.from("deal-files").upload(path, file);
       if (uploadError) throw uploadError;
 
