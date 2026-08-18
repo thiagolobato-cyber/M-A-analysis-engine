@@ -489,22 +489,48 @@ def build_pptx(bundle: dict, path: str):
     print(f"PPT salvo: {path}")
 
 
-def record_output_link(deal_id: str, synthesis_run_id: str | None):
-    """Grava em public.outputs um link direto pro Artifact desta execução do
-    GitHub Actions — é a entrega interina até o Microsoft Drive (Fase 5)
-    existir. GITHUB_REPOSITORY e GITHUB_RUN_ID são variáveis automáticas do
-    Actions, não precisam ser configuradas como secret."""
-    repo = os.environ.get("GITHUB_REPOSITORY")
-    run_id = os.environ.get("GITHUB_RUN_ID")
-    if not repo or not run_id:
-        print("Fora do GitHub Actions (teste local) — não grava outputs.")
+def upload_to_storage(local_path: str, storage_path: str, content_type: str):
+    """Sobe um arquivo pro bucket privado deal-outputs, via service_role
+    (o frontend nunca escreve aqui, só lê depois com signed URL)."""
+    url = os.environ["SUPABASE_URL"].rstrip("/") + "/storage/v1/object/deal-outputs/" + storage_path
+    key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+    with open(local_path, "rb") as f:
+        data = f.read()
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": content_type,
+        "x-upsert": "true",  # permite reprocessar sem dar erro de arquivo já existente
+    }
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    with urllib.request.urlopen(req) as resp:
+        print(f"Upload OK: {storage_path} ({resp.status})")
+
+
+def record_output_link(deal_id: str, synthesis_run_id: str | None, excel_path: str, pptx_path: str):
+    """Sobe os 2 arquivos pro Storage e grava as referências em public.outputs
+    — é isso que o frontend usa para gerar o link de download real (signed
+    URL), sem precisar passar pelo GitHub Actions."""
+    if not os.environ.get("GITHUB_REPOSITORY"):
+        print("Fora do GitHub Actions (teste local) — não sobe nem grava outputs.")
         return
-    run_url = f"https://github.com/{repo}/actions/runs/{run_id}"
+
+    excel_storage_ref = f"{deal_id}/analise.xlsx"
+    pptx_storage_ref = f"{deal_id}/executivo.pptx"
+    upload_to_storage(
+        excel_path, excel_storage_ref,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    upload_to_storage(
+        pptx_path, pptx_storage_ref,
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
+
     body = {
         "deal_id": deal_id,
         "synthesis_run_id": synthesis_run_id,
-        "excel_ref": run_url,
-        "ppt_ref": run_url,
+        "excel_ref": excel_storage_ref,
+        "ppt_ref": pptx_storage_ref,
     }
     url = os.environ["SUPABASE_URL"].rstrip("/") + "/rest/v1/outputs"
     key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
@@ -526,4 +552,4 @@ if __name__ == "__main__":
     pptx_path = f"output/{args.deal_id}_executivo.pptx"
     build_excel(bundle, excel_path)
     build_pptx(bundle, pptx_path)
-    record_output_link(args.deal_id, (bundle.get("synthesis") or {}).get("id"))
+    record_output_link(args.deal_id, (bundle.get("synthesis") or {}).get("id"), excel_path, pptx_path)
