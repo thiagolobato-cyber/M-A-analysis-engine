@@ -34,6 +34,7 @@ jobs:
   # ---- Os 5 agentes em paralelo — "matrix" é o fan-out nativo do GitHub Actions ----
   analyze:
     needs: extract
+    if: always()   # roda mesmo se a extração (ainda placeholder) tropeçar
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false   # um agente falhar não cancela os outros 4 — igual ao "Continue On Fail" do n8n
