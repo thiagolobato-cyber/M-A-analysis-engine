@@ -109,6 +109,30 @@ jobs:
         with:
           name: analise-${{ inputs.deal_id }}
           path: output/
+
+  # ---- Marca o deal como "error" se algo essencial falhou — sem isso, o
+  # status ficava preso em "processing" pra sempre, sem nenhum sinal visível
+  # na tela de que a análise não vai completar sozinha.
+  #
+  # Só depende do resultado do "synthesize", não do "analyze": 1 dos 5
+  # agentes falhar é tolerado de propósito (é para isso que o CFO Synthesis
+  # tem "if: always()") — só marcamos erro se a análise não fechou de vez.
+  mark_failed:
+    needs: [extract, analyze, synthesize]
+    if: always() && needs.synthesize.result != 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Marcar deal como error
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DEAL_ID: ${{ inputs.deal_id }}
+        run: |
+          curl -s -X PATCH "$SUPABASE_URL/rest/v1/deals?id=eq.$DEAL_ID" \
+            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"status": "error"}'
           retention-days: 90
       # TODO Fase 5: quando o acesso ao Microsoft Graph existir (Q11),
       # adicionar aqui um step de upload pro Drive, mantendo o artifact
