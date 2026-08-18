@@ -1,0 +1,33 @@
+name: Deploy Supabase Edge Function
+
+# Roda sozinho toda vez que o código da função mudar no repositório —
+# ninguém precisa rodar "supabase functions deploy" na própria máquina.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "supabase/functions/**"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      PROJECT_ID: alapimvqkppfqbidxsvd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Publicar a função (sem precisar de Docker)
+        run: supabase functions deploy trigger-analysis --project-ref $PROJECT_ID --use-api --no-verify-jwt
+
+      - name: Configurar os segredos que a função usa em tempo de execução
+        run: |
+          supabase secrets set --project-ref $PROJECT_ID \
+            GITHUB_TOKEN="${{ secrets.EDGE_FN_GITHUB_TOKEN }}" \
+            GITHUB_REPO="${{ secrets.EDGE_FN_GITHUB_REPO }}" \
+            SUPABASE_URL="${{ secrets.EDGE_FN_SUPABASE_URL }}" \
+            SUPABASE_ANON_KEY="${{ secrets.EDGE_FN_SUPABASE_ANON_KEY }}"
