@@ -252,10 +252,10 @@ async function loadDeals() {
     `;
     const actionTd = tr.querySelector("td:last-child");
 
-    if (deal.status === "uploaded") {
+    if (["uploaded", "processing", "error"].includes(deal.status)) {
       const btn = document.createElement("button");
       btn.className = "primary";
-      btn.textContent = "Analisar";
+      btn.textContent = deal.status === "uploaded" ? "Analisar" : "Reprocessar";
       btn.onclick = (e) => { e.stopPropagation(); triggerAnalysis(deal.id, btn); };
       actionTd.appendChild(btn);
     }
