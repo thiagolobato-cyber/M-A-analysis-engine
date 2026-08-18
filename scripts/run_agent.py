@@ -19,7 +19,9 @@ supabase.co) — vamos validar isso de verdade assim que os secrets do
 GitHub Actions existirem.
 """
 import argparse
+import base64
 import hashlib
+import io
 import json
 import os
 import re
@@ -27,6 +29,46 @@ import subprocess
 import sys
 import urllib.request
 import urllib.error
+
+from openpyxl import load_workbook
+
+MAX_ROWS_PER_SHEET = 300
+MAX_COLS_PER_SHEET = 40
+MAX_SHEETS = 30
+
+
+def excel_to_text(file_bytes: bytes, filename: str) -> str:
+    """Converte um Excel em texto legível pro Claude — não interpreta,
+    só descreve fielmente o que tem em cada aba, linha por linha.
+    Testado localmente contra os 8 arquivos reais do BHub antes de ir
+    pra produção (incluindo um com 24 abas e outro com erro #REF!)."""
+    try:
+        wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    except Exception as e:
+        return f"[ERRO ao abrir '{filename}' como Excel: {e}]"
+
+    parts = [f"===== ARQUIVO: {filename} ====="]
+    sheet_names = wb.sheetnames[:MAX_SHEETS]
+    if len(wb.sheetnames) > MAX_SHEETS:
+        parts.append(f"(arquivo tem {len(wb.sheetnames)} abas — mostrando as primeiras {MAX_SHEETS})")
+
+    for sheet_name in sheet_names:
+        ws = wb[sheet_name]
+        parts.append(f"\n--- Aba: {sheet_name} ---")
+        row_count = 0
+        for row in ws.iter_rows(values_only=True):
+            if row_count >= MAX_ROWS_PER_SHEET:
+                parts.append(f"[... aba truncada em {MAX_ROWS_PER_SHEET} linhas ...]")
+                break
+            row_trimmed = row[:MAX_COLS_PER_SHEET]
+            if all(v is None for v in row_trimmed):
+                row_count += 1
+                continue
+            values = [("" if v is None else str(v)) for v in row_trimmed]
+            parts.append(f"L{row_count+1}: " + " | ".join(values))
+            row_count += 1
+
+    return "\n".join(parts)
 
 
 def supabase_request(method: str, path: str, body: dict | None = None) -> dict:
@@ -54,6 +96,69 @@ def get_deal_data(deal_id: str) -> dict:
     if not rows:
         raise SystemExit(f"Nenhum deal_data encontrado para o deal {deal_id} — rode o Agent 00 primeiro.")
     return rows[0]
+
+
+def download_from_storage(storage_ref: str) -> bytes:
+    url = os.environ["SUPABASE_URL"].rstrip("/") + "/storage/v1/object/deal-files/" + storage_ref
+    key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+    req = urllib.request.Request(url, headers={"apikey": key, "Authorization": f"Bearer {key}"})
+    with urllib.request.urlopen(req) as resp:
+        return resp.read()
+
+
+def run_extraction(deal_id: str):
+    """Caminho próprio do Agent 00: baixa os arquivos do deal, converte pra
+    texto, chama o Claude, e CRIA um deal_data novo (os outros agentes só
+    leem um deal_data que já existe — este é quem produz)."""
+    files = supabase_request("GET", f"files?deal_id=eq.{deal_id}")
+    if not files:
+        raise SystemExit(f"Nenhum arquivo encontrado para o deal {deal_id} — nada para extrair.")
+
+    agent_version = get_active_agent_version("extraction")
+
+    combined_text = []
+    raw_bytes_for_checksum = b""
+    for f in files:
+        try:
+            content = download_from_storage(f["storage_ref"])
+        except urllib.error.HTTPError as e:
+            combined_text.append(f"===== ARQUIVO: {f['original_filename']} =====\n[ERRO ao baixar do Storage: {e.code}]")
+            continue
+        raw_bytes_for_checksum += content
+        combined_text.append(excel_to_text(content, f["original_filename"] or f["storage_ref"]))
+
+    full_dump = "\n\n".join(combined_text)
+    checksum = hashlib.sha256(raw_bytes_for_checksum).hexdigest()
+
+    # Idempotência: mesmo conjunto de arquivos (mesmo checksum) já foi extraído?
+    existing = supabase_request("GET", f"deal_data?deal_id=eq.{deal_id}&checksum=eq.{checksum}")
+    if existing:
+        print("[extraction] mesmo conjunto de arquivos já extraído antes — pulando (idempotência).")
+        return
+
+    output = call_claude(agent_version["system_prompt"], {"arquivos_em_texto": full_dump})
+
+    deal_data_row = supabase_request("POST", "deal_data", {
+        "deal_id": deal_id,
+        "schema_version": "v1",
+        "structured": output.get("structured", {}),
+        "raw_extracted": output.get("raw_extracted", {}),
+        "checksum": checksum,
+    })
+    deal_data_id = deal_data_row[0]["id"] if isinstance(deal_data_row, list) else deal_data_row["id"]
+
+    # Registra também em agent_runs, pro AI Audit Log não ter um buraco
+    # justamente no primeiro agente da cadeia.
+    supabase_request("POST", "agent_runs", {
+        "deal_id": deal_id,
+        "agent_version_id": agent_version["id"],
+        "deal_data_id": deal_data_id,
+        "input_hash": checksum,
+        "status": "completed",
+        "output": output,
+        "confidence": output.get("confidence"),
+    })
+    print(f"[extraction] deal_data criado ({deal_data_id}), confidence={output.get('confidence')}")
 
 
 def get_active_agent_version(agent_name: str) -> dict:
@@ -147,6 +252,10 @@ def main():
     parser.add_argument("--agent", required=True)
     parser.add_argument("--deal-id", required=True)
     args = parser.parse_args()
+
+    if args.agent == "extraction":
+        run_extraction(args.deal_id)
+        return
 
     deal_data = get_deal_data(args.deal_id)
     agent_version = get_active_agent_version(args.agent)
