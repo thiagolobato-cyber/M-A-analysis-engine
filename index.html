@@ -449,17 +449,28 @@ function openDetail(deal, agentRuns, synth) {
 
   $("detail-body").innerHTML = html;
 
-  // Link de download (Fase 6 — via GitHub Actions Artifact até o Drive existir)
+  // Link de download real — Excel/PPT ficam no Storage do Supabase; gera
+  // um signed URL na hora (o bucket é privado, não tem link público fixo).
   sb.from("outputs").select("*").eq("deal_id", deal.id).order("created_at", { ascending: false }).limit(1)
-    .then(({ data }) => {
-      if (data && data[0]) {
+    .then(async ({ data }) => {
+      if (!data || !data[0]) return;
+      const row = data[0];
+      const links = document.createElement("div");
+      links.style.marginTop = "10px";
+      links.style.display = "flex";
+      links.style.gap = "16px";
+
+      for (const [label, ref] of [["↓ Baixar Excel", row.excel_ref], ["↓ Baixar PPT", row.ppt_ref]]) {
+        if (!ref) continue;
+        const { data: signed, error } = await sb.storage.from("deal-outputs").createSignedUrl(ref, 300);
+        if (error || !signed) continue;
         const link = document.createElement("a");
-        link.href = data[0].excel_ref;
-        link.target = "_blank";
+        link.href = signed.signedUrl;
         link.className = "download-link";
-        link.textContent = "↓ Baixar Excel / PPT (GitHub Actions)";
-        $("detail-body").appendChild(link);
+        link.textContent = label;
+        links.appendChild(link);
       }
+      $("detail-body").appendChild(links);
     });
 
   $("detail-modal").classList.remove("hidden");
