@@ -21,13 +21,17 @@ jobs:
         with:
           version: latest
 
-      - name: Publicar a função (sem precisar de Docker)
-        run: supabase functions deploy trigger-analysis --project-ref $PROJECT_ID --use-api --no-verify-jwt
+      - name: Publicar as funções (sem precisar de Docker)
+        run: |
+          supabase functions deploy trigger-analysis --project-ref $PROJECT_ID --use-api --no-verify-jwt
+          supabase functions deploy update-user-role --project-ref $PROJECT_ID --use-api --no-verify-jwt
+          supabase functions deploy save-agent-prompt --project-ref $PROJECT_ID --use-api --no-verify-jwt
 
-      - name: Configurar os segredos que a função usa em tempo de execução
+      - name: Configurar os segredos que as funções usam em tempo de execução
         run: |
           supabase secrets set --project-ref $PROJECT_ID \
             GITHUB_TOKEN="${{ secrets.EDGE_FN_GITHUB_TOKEN }}" \
             GITHUB_REPO="${{ secrets.EDGE_FN_GITHUB_REPO }}" \
             SUPABASE_URL="${{ secrets.EDGE_FN_SUPABASE_URL }}" \
-            SUPABASE_ANON_KEY="${{ secrets.EDGE_FN_SUPABASE_ANON_KEY }}"
+            SUPABASE_ANON_KEY="${{ secrets.EDGE_FN_SUPABASE_ANON_KEY }}" \
+            SUPABASE_SERVICE_ROLE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}"
