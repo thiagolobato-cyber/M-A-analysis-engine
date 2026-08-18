@@ -110,7 +110,10 @@ tr.deal-row:hover{background:#FAFAF9}
 
   <div class="toolbar">
     <div></div>
-    <button class="primary" id="new-deal-btn">+ Novo Deal</button>
+    <div style="display:flex;gap:10px">
+      <button class="ghost" id="refresh-btn">↻ Atualizar</button>
+      <button class="primary" id="new-deal-btn">+ Novo Deal</button>
+    </div>
   </div>
 
   <table id="deals-table">
@@ -244,7 +247,7 @@ async function loadDeals() {
     tr.className = "deal-row";
     tr.innerHTML = `
       <td>${escapeHtml(deal.name)}</td>
-      <td><span class="badge ${deal.status}">${deal.status}</span></td>
+      <td><span class="badge ${deal.status}">${deal.status}</span><br/><span style="font-size:11px;color:var(--muted)">${relativeTime(deal.updated_at)}</span></td>
       <td>${escapeHtml(complexity)}</td>
       <td>${recommendation ? `<span class="badge ${recommendation}">${recommendation}</span>` : "—"}</td>
       <td>${new Date(deal.created_at).toLocaleDateString("pt-BR")}</td>
@@ -271,6 +274,17 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
+function relativeTime(isoString) {
+  if (!isoString) return "";
+  const diffMs = Date.now() - new Date(isoString).getTime();
+  const min = Math.round(diffMs / 60000);
+  if (min < 1) return "agora mesmo";
+  if (min < 60) return `há ${min} min`;
+  const h = Math.round(min / 60);
+  if (h < 24) return `há ${h} h`;
+  return `há ${Math.round(h / 24)} d`;
+}
+
 // Nomes de arquivo reais têm acento, apóstrofo, espaço (ex: "DRE's.xlsx",
 // "Balanços 2026.xlsx") — o Storage do Supabase não aceita isso na chave
 // do objeto. Sanitiza só o caminho salvo; o nome original fica preservado
@@ -288,6 +302,8 @@ function sanitizeFilename(name) {
 // ---------------------------------------------------------------------
 // Criar deal + upload de arquivos
 // ---------------------------------------------------------------------
+$("refresh-btn").addEventListener("click", () => loadDeals());
+
 $("new-deal-btn").addEventListener("click", () => {
   $("new-deal-name").value = "";
   $("new-deal-files").value = "";
