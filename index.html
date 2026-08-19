@@ -143,6 +143,7 @@ select.role-select{width:auto;padding:6px 10px;font-size:13px}
     <div class="sidebar-footer">
       <div class="role-badge" id="sidebar-role"></div>
       <div class="email" id="sidebar-email"></div>
+      <button class="ghost" id="change-password-btn" style="width:100%;background:transparent;color:rgba(255,255,255,.75);border-color:rgba(255,255,255,.2);margin-bottom:8px">Alterar senha</button>
       <button class="ghost" id="logout-btn" style="width:100%;background:transparent;color:rgba(255,255,255,.75);border-color:rgba(255,255,255,.2)">Sair</button>
     </div>
   </aside>
@@ -314,6 +315,34 @@ $("login-btn").addEventListener("click", async () => {
 $("logout-btn").addEventListener("click", async () => {
   await sb.auth.signOut();
   showLogin();
+});
+
+$("change-password-btn").addEventListener("click", () => {
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal" style="max-width:400px">
+      <h2>Alterar senha</h2>
+      <p class="sub">Vale só para sua própria conta.</p>
+      <div class="field"><label>Nova senha</label><input type="password" id="new-password" /></div>
+      <div class="error-msg hidden" id="password-error"></div>
+      <div class="modal-actions">
+        <button class="ghost" id="password-cancel">Cancelar</button>
+        <button class="primary" id="password-submit">Salvar</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.querySelector("#password-cancel").onclick = () => backdrop.remove();
+  backdrop.querySelector("#password-submit").onclick = async () => {
+    const newPassword = backdrop.querySelector("#new-password").value;
+    const errEl = backdrop.querySelector("#password-error");
+    if (newPassword.length < 8) { errEl.textContent = "Pelo menos 8 caracteres."; errEl.classList.remove("hidden"); return; }
+    const { error } = await sb.auth.updateUser({ password: newPassword });
+    if (error) { errEl.textContent = "Erro: " + error.message; errEl.classList.remove("hidden"); return; }
+    backdrop.remove();
+    alert("Senha alterada.");
+  };
 });
 
 document.querySelectorAll(".nav-item[data-page]").forEach(el => {
@@ -617,11 +646,11 @@ async function renderAdminPage() {
   content.innerHTML = `
     <div class="page-header">
       <div><h1>Administração</h1><p>Papéis de acesso do time</p></div>
-      <button class="primary" id="invite-btn">+ Convidar pessoa</button>
+      <button class="primary" id="invite-btn">+ Criar conta</button>
     </div>
-    <div class="callout" style="margin-bottom:16px">Convidar manda um e-mail com um link — a pessoa clica, define a própria senha, e já entra com o papel escolhido aqui.</div>
+    <div class="callout" style="margin-bottom:16px">Você define a senha na hora de criar — combine com a pessoa por um canal seguro. Ela pode trocar a própria senha depois de logada, em "Alterar senha" no rodapé do menu.</div>
     <table>
-      <thead><tr><th>E-mail</th><th>Papel</th><th>Desde</th></tr></thead>
+      <thead><tr><th>Nome</th><th>E-mail</th><th>Papel</th><th>Desde</th></tr></thead>
       <tbody id="admin-tbody"></tbody>
     </table>
   `;
@@ -634,11 +663,12 @@ async function renderAdminPage() {
     const tr = document.createElement("tr");
     const isSelf = p.id === session.user.id;
     tr.innerHTML = `
+      <td>${escapeHtml(p.name || "—")}</td>
       <td>${escapeHtml(p.email)}${isSelf ? " <span style='color:var(--muted);font-size:12px'>(você)</span>" : ""}</td>
       <td></td>
       <td>${new Date(p.created_at).toLocaleDateString("pt-BR")}</td>
     `;
-    const roleTd = tr.querySelectorAll("td")[1];
+    const roleTd = tr.querySelectorAll("td")[2];
     const select = document.createElement("select");
     select.className = "role-select";
     select.innerHTML = `<option value="analyst">Analyst (leitor)</option><option value="admin">Admin (leitor + editor)</option>`;
@@ -664,38 +694,56 @@ function openInviteModal() {
   backdrop.className = "modal-backdrop";
   backdrop.innerHTML = `
     <div class="modal" style="max-width:440px">
-      <h2>Convidar pessoa</h2>
-      <p class="sub">Vai um e-mail de convite via Supabase.</p>
-      <div class="field"><label>E-mail</label><input type="email" id="invite-email" /></div>
-      <div class="field"><label>Papel</label>
-        <select id="invite-role"><option value="analyst">Analyst (leitor)</option><option value="admin">Admin (leitor + editor)</option></select>
+      <h2>Criar conta</h2>
+      <p class="sub">Você define a senha agora; a pessoa pode trocar depois, já logada, em "Alterar senha".</p>
+      <div class="field"><label>Nome</label><input type="text" id="create-name" /></div>
+      <div class="field"><label>E-mail</label><input type="email" id="create-email" /></div>
+      <div class="field">
+        <label>Senha</label>
+        <div style="display:flex;gap:8px">
+          <input type="text" id="create-password" />
+          <button type="button" class="ghost" id="gen-password-btn" style="white-space:nowrap">Gerar</button>
+        </div>
       </div>
-      <div class="error-msg hidden" id="invite-error"></div>
+      <div class="field"><label>Papel</label>
+        <select id="create-role"><option value="analyst">Analyst (leitor)</option><option value="admin">Admin (leitor + editor)</option></select>
+      </div>
+      <div class="error-msg hidden" id="create-error"></div>
       <div class="modal-actions">
-        <button class="ghost" id="invite-cancel">Cancelar</button>
-        <button class="primary" id="invite-submit">Enviar convite</button>
+        <button class="ghost" id="create-cancel">Cancelar</button>
+        <button class="primary" id="create-submit">Criar conta</button>
       </div>
     </div>
   `;
   document.body.appendChild(backdrop);
-  backdrop.querySelector("#invite-cancel").onclick = () => backdrop.remove();
-  backdrop.querySelector("#invite-submit").onclick = async () => {
-    const email = backdrop.querySelector("#invite-email").value.trim();
-    const role = backdrop.querySelector("#invite-role").value;
-    const errEl = backdrop.querySelector("#invite-error");
-    const btn = backdrop.querySelector("#invite-submit");
-    if (!email) { errEl.textContent = "Digite um e-mail."; errEl.classList.remove("hidden"); return; }
+  backdrop.querySelector("#create-cancel").onclick = () => backdrop.remove();
+  backdrop.querySelector("#gen-password-btn").onclick = () => {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+    let pwd = "";
+    for (let i = 0; i < 12; i++) pwd += chars[Math.floor(Math.random() * chars.length)];
+    backdrop.querySelector("#create-password").value = pwd;
+  };
+  backdrop.querySelector("#create-submit").onclick = async () => {
+    const name = backdrop.querySelector("#create-name").value.trim();
+    const email = backdrop.querySelector("#create-email").value.trim();
+    const password = backdrop.querySelector("#create-password").value;
+    const role = backdrop.querySelector("#create-role").value;
+    const errEl = backdrop.querySelector("#create-error");
+    const btn = backdrop.querySelector("#create-submit");
+    if (!email || !password) { errEl.textContent = "E-mail e senha são obrigatórios."; errEl.classList.remove("hidden"); return; }
+    if (password.length < 8) { errEl.textContent = "Senha precisa de pelo menos 8 caracteres."; errEl.classList.remove("hidden"); return; }
     btn.disabled = true;
-    btn.textContent = "Enviando...";
+    btn.textContent = "Criando...";
     try {
-      await callEdgeFunction("invite-user", { email, role });
+      await callEdgeFunction("create-user", { name, email, password, role });
+      alert(`Conta criada. Combine a senha com ${name || email} por um canal seguro (não fica salva em nenhum lugar depois deste momento).`);
       backdrop.remove();
       renderAdminPage();
     } catch (err) {
-      errEl.textContent = "Erro ao convidar: " + err.message;
+      errEl.textContent = "Erro ao criar conta: " + err.message;
       errEl.classList.remove("hidden");
       btn.disabled = false;
-      btn.textContent = "Enviar convite";
+      btn.textContent = "Criar conta";
     }
   };
 }
@@ -707,7 +755,7 @@ const ACTION_LABELS = {
   create_deal: "criou o deal", view_deal: "abriu o deal", delete_deal: "excluiu o deal",
   trigger_analysis: "disparou análise em", download_output: "baixou arquivo de",
   change_role: "alterou papel de acesso", edit_prompt: "editou prompt do agente",
-  invite_user: "convidou pessoa",
+  create_user: "criou conta de",
 };
 
 let activityOffset = 0;
@@ -777,7 +825,7 @@ async function loadActivity(reset) {
     const tr = document.createElement("tr");
     const detail = log.action === "edit_prompt" ? log.details?.agent_name
                  : log.action === "change_role" ? `novo papel: ${log.details?.new_role}`
-                 : log.action === "invite_user" ? `${log.details?.invited_email} (${log.details?.role})`
+                 : log.action === "create_user" ? `${log.details?.created_email} (${log.details?.role})`
                  : log.details?.name || log.details?.file || "";
     tr.innerHTML = `
       <td style="font-size:13px;color:var(--muted)">${new Date(log.created_at).toLocaleString("pt-BR")}</td>
