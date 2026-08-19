@@ -184,7 +184,12 @@ def download_from_storage(storage_ref: str) -> bytes:
 def run_extraction(deal_id: str):
     """Caminho próprio do Agent 00: baixa os arquivos do deal, converte pra
     texto, chama o Claude, e CRIA um deal_data novo (os outros agentes só
-    leem um deal_data que já existe — este é quem produz)."""
+    leem um deal_data que já existe — este é quem produz).
+
+    A série mensal consolidada (quando existe) é calculada pelo código e
+    injetada direto no resultado — não pedimos pro Claude copiar de volta
+    uma tabela de centenas de contas x 12 meses que o código já tem. Isso
+    era o que estava estourando o timeout de 10 minutos (visto em 19/08)."""
     files = supabase_request("GET", f"files?deal_id=eq.{deal_id}")
     if not files:
         raise SystemExit(f"Nenhum arquivo encontrado para o deal {deal_id} — nada para extrair.")
@@ -193,6 +198,7 @@ def run_extraction(deal_id: str):
 
     combined_text = []
     raw_bytes_for_checksum = b""
+    code_computed_series = []  # preenchido diretamente pelo código, não pelo LLM
     for f in files:
         try:
             content = download_from_storage(f["storage_ref"])
@@ -200,18 +206,40 @@ def run_extraction(deal_id: str):
             combined_text.append(f"===== ARQUIVO: {f['original_filename']} =====\n[ERRO ao baixar do Storage: {e.code}]")
             continue
         raw_bytes_for_checksum += content
-        combined_text.append(excel_to_text(content, f["original_filename"] or f["storage_ref"]))
+        filename = f["original_filename"] or f["storage_ref"]
+        combined_text.append(excel_to_text(content, filename))
+
+        # Mesma detecção que excel_to_text já faz internamente pra montar o
+        # texto — repetida aqui (é barato, é só leitura de planilha) pra
+        # também termos os dados como estrutura, não só como texto.
+        try:
+            wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+            monthly = detect_monthly_sheets(wb)
+            if monthly:
+                accounts = merge_monthly_balancete(wb, monthly)
+                for (nome, codigo), data in accounts.items():
+                    code_computed_series.append({
+                        "conta": nome, "codigo": codigo, "tipo": data["tipo"],
+                        "valores": {f"mes_{m:02d}": v for m, v in data["meses"].items()},
+                        "arquivo": filename,
+                    })
+        except Exception as e:
+            print(f"[extraction] aviso: não consegui recalcular série mensal de {filename}: {e}")
 
     full_dump = "\n\n".join(combined_text)
     checksum = hashlib.sha256(raw_bytes_for_checksum).hexdigest()
 
-    # Idempotência: mesmo conjunto de arquivos (mesmo checksum) já foi extraído?
     existing = supabase_request("GET", f"deal_data?deal_id=eq.{deal_id}&checksum=eq.{checksum}")
     if existing:
         print("[extraction] mesmo conjunto de arquivos já extraído antes — pulando (idempotência).")
         return
 
     output = call_claude(agent_version["system_prompt"], {"arquivos_em_texto": full_dump})
+
+    # Injeta a série calculada pelo código — sobrepõe o que o LLM eventualmente
+    # tenha tentado copiar (nunca confiamos numa cópia manual de 300+ linhas).
+    if code_computed_series:
+        output.setdefault("raw_extracted", {})["series_contabeis"] = code_computed_series
 
     deal_data_row = supabase_request("POST", "deal_data", {
         "deal_id": deal_id,
