@@ -615,13 +615,17 @@ async function loadAgentEditor(agent) {
 async function renderAdminPage() {
   const content = $("content");
   content.innerHTML = `
-    <div class="page-header"><div><h1>Administração</h1><p>Papéis de acesso do time</p></div></div>
-    <div class="callout" style="margin-bottom:16px">Para criar uma conta nova, use o painel do Supabase (Authentication → Add user). Aqui você só ajusta o papel de quem já tem conta.</div>
+    <div class="page-header">
+      <div><h1>Administração</h1><p>Papéis de acesso do time</p></div>
+      <button class="primary" id="invite-btn">+ Convidar pessoa</button>
+    </div>
+    <div class="callout" style="margin-bottom:16px">Convidar manda um e-mail com um link — a pessoa clica, define a própria senha, e já entra com o papel escolhido aqui.</div>
     <table>
       <thead><tr><th>E-mail</th><th>Papel</th><th>Desde</th></tr></thead>
       <tbody id="admin-tbody"></tbody>
     </table>
   `;
+  $("invite-btn").addEventListener("click", openInviteModal);
   const { data: profiles } = await sb.from("profiles").select("*").order("email");
   const tbody = $("admin-tbody");
   const { data: { session } } = await sb.auth.getSession();
@@ -655,6 +659,47 @@ async function renderAdminPage() {
   }
 }
 
+function openInviteModal() {
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal" style="max-width:440px">
+      <h2>Convidar pessoa</h2>
+      <p class="sub">Vai um e-mail de convite via Supabase.</p>
+      <div class="field"><label>E-mail</label><input type="email" id="invite-email" /></div>
+      <div class="field"><label>Papel</label>
+        <select id="invite-role"><option value="analyst">Analyst (leitor)</option><option value="admin">Admin (leitor + editor)</option></select>
+      </div>
+      <div class="error-msg hidden" id="invite-error"></div>
+      <div class="modal-actions">
+        <button class="ghost" id="invite-cancel">Cancelar</button>
+        <button class="primary" id="invite-submit">Enviar convite</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.querySelector("#invite-cancel").onclick = () => backdrop.remove();
+  backdrop.querySelector("#invite-submit").onclick = async () => {
+    const email = backdrop.querySelector("#invite-email").value.trim();
+    const role = backdrop.querySelector("#invite-role").value;
+    const errEl = backdrop.querySelector("#invite-error");
+    const btn = backdrop.querySelector("#invite-submit");
+    if (!email) { errEl.textContent = "Digite um e-mail."; errEl.classList.remove("hidden"); return; }
+    btn.disabled = true;
+    btn.textContent = "Enviando...";
+    try {
+      await callEdgeFunction("invite-user", { email, role });
+      backdrop.remove();
+      renderAdminPage();
+    } catch (err) {
+      errEl.textContent = "Erro ao convidar: " + err.message;
+      errEl.classList.remove("hidden");
+      btn.disabled = false;
+      btn.textContent = "Enviar convite";
+    }
+  };
+}
+
 // =======================================================================
 // PÁGINA: ATIVIDADE (admin)
 // =======================================================================
@@ -662,23 +707,77 @@ const ACTION_LABELS = {
   create_deal: "criou o deal", view_deal: "abriu o deal", delete_deal: "excluiu o deal",
   trigger_analysis: "disparou análise em", download_output: "baixou arquivo de",
   change_role: "alterou papel de acesso", edit_prompt: "editou prompt do agente",
+  invite_user: "convidou pessoa",
 };
+
+let activityOffset = 0;
+const ACTIVITY_PAGE_SIZE = 50;
 
 async function renderActivityPage() {
   const content = $("content");
+  const { data: profiles } = await sb.from("profiles").select("email").order("email");
+
   content.innerHTML = `
-    <div class="page-header"><div><h1>Atividade</h1><p>Quem fez o quê, e quando — últimas 100 ações</p></div></div>
+    <div class="page-header"><div><h1>Atividade</h1><p>Quem fez o quê, e quando</p></div></div>
+    <div style="display:flex;gap:10px;margin-bottom:16px">
+      <select id="filter-person" style="max-width:220px">
+        <option value="">Todas as pessoas</option>
+        ${profiles.map(p => `<option value="${escapeHtml(p.email)}">${escapeHtml(p.email)}</option>`).join("")}
+      </select>
+      <select id="filter-action" style="max-width:200px">
+        <option value="">Todas as ações</option>
+        ${Object.entries(ACTION_LABELS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}
+      </select>
+      <select id="filter-period" style="max-width:180px">
+        <option value="1">Hoje</option>
+        <option value="7" selected>Últimos 7 dias</option>
+        <option value="30">Últimos 30 dias</option>
+        <option value="0">Tudo</option>
+      </select>
+    </div>
     <table>
       <thead><tr><th>Quando</th><th>Quem</th><th>Ação</th><th>Detalhe</th></tr></thead>
       <tbody id="activity-tbody"></tbody>
     </table>
+    <div style="text-align:center;margin-top:16px">
+      <button class="ghost hidden" id="load-more-btn">Carregar mais</button>
+    </div>
   `;
-  const { data: logs } = await sb.from("activity_log").select("*").order("created_at", { ascending: false }).limit(100);
+  activityOffset = 0;
+  $("filter-person").addEventListener("change", () => loadActivity(true));
+  $("filter-action").addEventListener("change", () => loadActivity(true));
+  $("filter-period").addEventListener("change", () => loadActivity(true));
+  $("load-more-btn").addEventListener("click", () => loadActivity(false));
+  loadActivity(true);
+}
+
+async function loadActivity(reset) {
+  if (reset) { activityOffset = 0; $("activity-tbody").innerHTML = ""; }
+
+  let query = sb.from("activity_log").select("*").order("created_at", { ascending: false });
+
+  const person = $("filter-person").value;
+  const action = $("filter-action").value;
+  const periodDays = parseInt($("filter-period").value);
+
+  if (person) query = query.eq("user_email", person);
+  if (action) query = query.eq("action", action);
+  if (periodDays > 0) {
+    const since = new Date(Date.now() - periodDays * 86400000).toISOString();
+    query = query.gte("created_at", since);
+  }
+
+  query = query.range(activityOffset, activityOffset + ACTIVITY_PAGE_SIZE - 1);
+
+  const { data: logs, error } = await query;
+  if (error) { console.error(error); return; }
+
   const tbody = $("activity-tbody");
-  for (const log of (logs || [])) {
+  for (const log of logs) {
     const tr = document.createElement("tr");
     const detail = log.action === "edit_prompt" ? log.details?.agent_name
                  : log.action === "change_role" ? `novo papel: ${log.details?.new_role}`
+                 : log.action === "invite_user" ? `${log.details?.invited_email} (${log.details?.role})`
                  : log.details?.name || log.details?.file || "";
     tr.innerHTML = `
       <td style="font-size:13px;color:var(--muted)">${new Date(log.created_at).toLocaleString("pt-BR")}</td>
@@ -687,6 +786,11 @@ async function renderActivityPage() {
       <td style="color:var(--muted);font-size:13px">${escapeHtml(detail)}</td>
     `;
     tbody.appendChild(tr);
+  }
+  activityOffset += logs.length;
+  $("load-more-btn").classList.toggle("hidden", logs.length < ACTIVITY_PAGE_SIZE);
+  if (reset && logs.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:30px">Nenhuma atividade encontrada com esses filtros.</td></tr>`;
   }
 }
 
