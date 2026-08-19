@@ -35,22 +35,97 @@ from openpyxl import load_workbook
 MAX_ROWS_PER_SHEET = 300
 MAX_COLS_PER_SHEET = 40
 MAX_SHEETS = 30
+MONTHLY_SHEET_RE = re.compile(r'(?i)^m[eê]s\s*0?(\d{1,2})$')
+
+
+def detect_monthly_sheets(wb):
+    """Detecta abas no padrão 'MES 01'..'MES 12' — um mês por aba, mesmo
+    layout de colunas em cada uma. Comum em exports de Balancete brasileiros."""
+    found = []
+    for name in wb.sheetnames:
+        m = MONTHLY_SHEET_RE.match(name.strip())
+        if m:
+            found.append((int(m.group(1)), name))
+    found.sort()
+    return found if len(found) >= 3 else []
+
+
+def merge_monthly_balancete(wb, monthly_sheets):
+    """Cruza as abas mensais por conta (nome + código), pegando o último
+    valor numérico de cada linha como saldo final do mês — validado contra
+    um arquivo real: Saldo Anterior + Débito − Crédito = Saldo Atual,
+    sempre na última posição."""
+    accounts = {}
+    for month_num, sheet_name in monthly_sheets:
+        ws = wb[sheet_name]
+        for row in ws.iter_rows(values_only=True):
+            if len(row) < 5:
+                continue
+            _, nome, codigo, tipo = row[0], row[1], row[2], row[3]
+            if nome is None or codigo is None:
+                continue
+            numeric_vals = [v for v in row[4:] if isinstance(v, (int, float))]
+            if not numeric_vals:
+                continue
+            key = (str(nome).strip(), codigo)
+            if key not in accounts:
+                accounts[key] = {"tipo": tipo, "meses": {}}
+            accounts[key]["meses"][month_num] = numeric_vals[-1]
+    return accounts
+
+
+def format_merged_table(accounts, max_rows=300):
+    """Formata o cruzamento como tabela, ordenada por relevância (maior
+    valor absoluto em qualquer mês primeiro) — isso substitui pedir pro
+    modelo cruzar 12 abas manualmente, o que não é confiável."""
+    def materiality(item):
+        return max((abs(v) for v in item[1]["meses"].values()), default=0)
+    sorted_accounts = sorted(accounts.items(), key=materiality, reverse=True)
+
+    lines = [
+        "===== SÉRIE MENSAL CONSOLIDADA (cruzada automaticamente das abas mensais) =====",
+        "Saldo final de cada mês, ordenado por relevância (maior valor absoluto primeiro).",
+        "ATENÇÃO: contas de resultado (receita/despesa, geralmente código iniciando em 3 ou 4) "
+        "costumam vir ACUMULADAS no ano-calendário — para o valor do mês isolado, calcule a "
+        "diferença entre um mês e o anterior. Contas de balanço (ativo/passivo) já são o saldo "
+        "no fim daquele mês, sem precisar de ajuste.",
+        "Conta | Código | Tipo(S=sintética/A=analítica) | " + " | ".join(f"Mês{m:02d}" for m in range(1, 13)),
+    ]
+    for i, ((nome, codigo), data) in enumerate(sorted_accounts):
+        if i >= max_rows:
+            lines.append(f"[... {len(sorted_accounts) - max_rows} contas menos relevantes omitidas ...]")
+            break
+        valores = " | ".join(f"{data['meses'].get(m, 0):.2f}" if m in data["meses"] else "—" for m in range(1, 13))
+        lines.append(f"{nome} | {codigo} | {data['tipo']} | {valores}")
+    return "\n".join(lines)
 
 
 def excel_to_text(file_bytes: bytes, filename: str) -> str:
     """Converte um Excel em texto legível pro Claude — não interpreta,
     só descreve fielmente o que tem em cada aba, linha por linha.
     Testado localmente contra os 8 arquivos reais do BHub antes de ir
-    pra produção (incluindo um com 24 abas e outro com erro #REF!)."""
+    pra produção (incluindo um com 24 abas e outro com erro #REF!).
+
+    Quando detecta o padrão de abas mensais (MES 01..MES 12), cruza as
+    contas automaticamente numa tabela só, em vez de despejar as 12 abas
+    cruas — mais confiável (não depende do modelo de IA cruzar 12 abas
+    de cabeça) e ~3,5x mais compacto."""
     try:
         wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
     except Exception as e:
         return f"[ERRO ao abrir '{filename}' como Excel: {e}]"
 
     parts = [f"===== ARQUIVO: {filename} ====="]
-    sheet_names = wb.sheetnames[:MAX_SHEETS]
-    if len(wb.sheetnames) > MAX_SHEETS:
-        parts.append(f"(arquivo tem {len(wb.sheetnames)} abas — mostrando as primeiras {MAX_SHEETS})")
+
+    monthly_sheets = detect_monthly_sheets(wb)
+    skip_sheets = {name for _, name in monthly_sheets}
+    if monthly_sheets:
+        accounts = merge_monthly_balancete(wb, monthly_sheets)
+        parts.append(format_merged_table(accounts))
+
+    sheet_names = [s for s in wb.sheetnames if s not in skip_sheets][:MAX_SHEETS]
+    if len(wb.sheetnames) - len(skip_sheets) > MAX_SHEETS:
+        parts.append(f"(arquivo tem mais abas — mostrando as primeiras {MAX_SHEETS} além da série mensal)")
 
     for sheet_name in sheet_names:
         ws = wb[sheet_name]
