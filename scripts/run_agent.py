@@ -258,7 +258,13 @@ def get_active_agent_version(agent_name: str) -> dict:
 
 
 def call_claude(system_prompt: str, deal_data: dict, other_outputs: dict | None = None) -> dict:
-    """Chama o Claude Code em modo headless e valida que a resposta é JSON."""
+    """Chama o Claude Code em modo headless e valida que a resposta é JSON.
+
+    O prompt vai por stdin, não como argumento de linha de comando — prompts
+    grandes (planilhas reais podem passar de 100 mil caracteres) estouram o
+    limite do sistema operacional para argumentos (visto na prática em
+    19/08: OSError "Argument list too long"). Documentação oficial confirma
+    stdin como o caminho certo para isso: `echo "..." | claude -p`."""
     user_payload = {"deal_data": deal_data}
     if other_outputs:
         user_payload["outputs_dos_outros_agentes"] = other_outputs
@@ -266,10 +272,11 @@ def call_claude(system_prompt: str, deal_data: dict, other_outputs: dict | None 
     full_prompt = system_prompt + "\n\n# Dados do deal\n\n" + json.dumps(user_payload, ensure_ascii=False, indent=2)
 
     result = subprocess.run(
-        ["claude", "-p", full_prompt, "--output-format", "json"],
+        ["claude", "-p", "--output-format", "json"],
+        input=full_prompt,
         capture_output=True,
         text=True,
-        timeout=300,
+        timeout=600,  # prompts grandes com Opus podem demorar mais que os 300s originais
     )
     if result.returncode != 0:
         raise RuntimeError(f"claude -p saiu com erro: {result.stderr}")
