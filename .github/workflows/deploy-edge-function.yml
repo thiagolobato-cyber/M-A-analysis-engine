@@ -26,6 +26,7 @@ jobs:
           supabase functions deploy trigger-analysis --project-ref $PROJECT_ID --use-api --no-verify-jwt
           supabase functions deploy update-user-role --project-ref $PROJECT_ID --use-api --no-verify-jwt
           supabase functions deploy save-agent-prompt --project-ref $PROJECT_ID --use-api --no-verify-jwt
+          supabase functions deploy invite-user --project-ref $PROJECT_ID --use-api --no-verify-jwt
 
       - name: Configurar os segredos que as funções usam em tempo de execução
         run: |
@@ -35,3 +36,4 @@ jobs:
             SUPABASE_URL="${{ secrets.EDGE_FN_SUPABASE_URL }}" \
             SUPABASE_ANON_KEY="${{ secrets.EDGE_FN_SUPABASE_ANON_KEY }}" \
             SUPABASE_SERVICE_ROLE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}"
+
