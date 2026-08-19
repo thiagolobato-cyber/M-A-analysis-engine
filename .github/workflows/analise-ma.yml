@@ -128,11 +128,16 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           DEAL_ID: ${{ inputs.deal_id }}
         run: |
-          curl -s -X PATCH "$SUPABASE_URL/rest/v1/deals?id=eq.$DEAL_ID" \
+          http_code=$(curl -s -o /tmp/resp.txt -w "%{http_code}" -X PATCH "$SUPABASE_URL/rest/v1/deals?id=eq.$DEAL_ID" \
             -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
             -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
             -H "Content-Type: application/json" \
-            -d '{"status": "error"}'
+            -d '{"status": "error"}')
+          echo "HTTP status: $http_code"
+          cat /tmp/resp.txt
+          # Este job é best-effort — não deixa o workflow ficar vermelho por
+          # causa dele; o que importa é ter tentado marcar o status.
+          exit 0
           retention-days: 90
       # TODO Fase 5: quando o acesso ao Microsoft Graph existir (Q11),
       # adicionar aqui um step de upload pro Drive, mantendo o artifact
