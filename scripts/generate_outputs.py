@@ -239,39 +239,151 @@ def build_excel(bundle: dict, path: str):
             row += 2
     autosize(ws, [28, 60, 20, 20])
 
-    # 7. Financial Analysis (não estava no Prompt Master original — agente
-    #    adicionado em 15/08; ver arquitetura.html seção 5) -----------------
+    # 7. Financial Analysis — reescrito para o schema forense v2.0 (19/08):
+    #    DRE de verdade, anomalias mês a mês, simulação de cenário, DD ------
     ws = wb.create_sheet("Financial Analysis")
     fin = agents.get("financial_analysis", {}).get("output", {}) or {}
-    rows = [
-        ("EBITDA reportado", fin.get("ebitda_reportado")),
-        ("EBITDA normalizado", fin.get("ebitda_normalizado")),
-        ("Resultado geral", fin.get("resultado")),
-        ("Tendência de margem", (fin.get("margens") or {}).get("tendencia")),
-    ]
-    for i, (label, value) in enumerate(rows, start=1):
-        ws.cell(row=i, column=1, value=label).font = Font(bold=True)
-        ws.cell(row=i, column=2, value=value)
-    row = len(rows) + 2
-    ws.cell(row=row, column=1, value="Ajustes candidatos ao EBITDA").font = title_font
+    row = 1
+
+    dre = fin.get("resumo_dre") or {}
+    ws.cell(row=row, column=1, value="1. Resumo do DRE").font = title_font
     row += 1
-    headers = ["Descrição", "Valor estimado", "Certeza", "Motivo"]
+    dre_rows = [
+        ("Período", dre.get("periodo")), ("Receita Bruta", dre.get("receita_bruta")),
+        ("Impostos", dre.get("impostos")), ("Receita Líquida", dre.get("receita_liquida")),
+        ("Despesas Operacionais", dre.get("despesas_operacionais")), ("EBITDA", dre.get("ebitda")),
+        ("Margem EBITDA %", dre.get("margem_ebitda_pct")), ("Resultado Financeiro", dre.get("resultado_financeiro")),
+        ("Lucro Líquido", dre.get("lucro_liquido")), ("Margem Líquida %", dre.get("margem_liquida_pct")),
+    ]
+    for label, value in dre_rows:
+        ws.cell(row=row, column=1, value=label).font = Font(bold=True)
+        ws.cell(row=row, column=2, value=value)
+        row += 1
+    evolucao = dre.get("evolucao") or []
+    if evolucao:
+        row += 1
+        ws.cell(row=row, column=1, value="Evolução por período").font = Font(bold=True)
+        row += 1
+        for i, h in enumerate(["Período", "Receita Líquida", "EBITDA"], start=1):
+            ws.cell(row=row, column=i, value=h)
+        style_header_row(ws, row, 3)
+        row += 1
+        for p in evolucao:
+            ws.cell(row=row, column=1, value=p.get("periodo"))
+            ws.cell(row=row, column=2, value=p.get("receita_liquida"))
+            ws.cell(row=row, column=3, value=p.get("ebitda"))
+            row += 1
+
+    row += 2
+    bal = fin.get("balanco_e_caixa") or {}
+    ws.cell(row=row, column=1, value="2. Balanço e Capital de Giro").font = title_font
+    row += 1
+    for label, value in [("Ativo Total", bal.get("ativo_total")), ("Passivo Total", bal.get("passivo_total")),
+                          ("Patrimônio Líquido", bal.get("patrimonio_liquido")), ("Liquidez Corrente", bal.get("liquidez_corrente")),
+                          ("Caixa Inicial", bal.get("caixa_inicial")), ("Caixa Final", bal.get("caixa_final")),
+                          ("Variação de Caixa %", bal.get("variacao_caixa_pct"))]:
+        ws.cell(row=row, column=1, value=label).font = Font(bold=True)
+        ws.cell(row=row, column=2, value=value)
+        row += 1
+
+    row += 2
+    pessoas = fin.get("estudo_pessoas") or {}
+    ws.cell(row=row, column=1, value="3. Estudo de Despesas com Pessoas").font = title_font
+    row += 1
+    if pessoas.get("aplica"):
+        for label, value in [("Custo total de pessoas", pessoas.get("custo_total_pessoas")),
+                              ("% da receita", pessoas.get("pct_da_receita")),
+                              ("Distribuição de lucros a sócios", pessoas.get("distribuicao_lucros_socios")),
+                              ("% do lucro", pessoas.get("pct_do_lucro")),
+                              ("% PJ da folha", pessoas.get("pct_pj_da_folha"))]:
+            ws.cell(row=row, column=1, value=label); ws.cell(row=row, column=2, value=value)
+            row += 1
+        for obs in pessoas.get("observacoes", []):
+            ws.cell(row=row, column=1, value=f"• {obs}"); row += 1
+    else:
+        ws.cell(row=row, column=1, value="Não aplicável — " + "; ".join(pessoas.get("observacoes", ["dado insuficiente"])))
+        row += 1
+
+    row += 2
+    sim = fin.get("simulacao_cenario") or {}
+    ws.cell(row=row, column=1, value="4. Simulação de Cenário").font = title_font
+    row += 1
+    if sim.get("aplica"):
+        ws.cell(row=row, column=1, value=sim.get("descricao", "")); row += 1
+        for premissa in sim.get("premissas", []):
+            ws.cell(row=row, column=1, value=f"Premissa: {premissa}"); row += 1
+        for label, value in [("Lucro atual", sim.get("lucro_atual")), ("Lucro simulado", sim.get("lucro_simulado")),
+                              ("Margem atual %", sim.get("margem_atual_pct")), ("Margem simulada %", sim.get("margem_simulada_pct"))]:
+            ws.cell(row=row, column=1, value=label).font = Font(bold=True); ws.cell(row=row, column=2, value=value)
+            row += 1
+    else:
+        ws.cell(row=row, column=1, value=sim.get("descricao", "Sem dado suficiente para simular cenário."))
+        row += 1
+
+    row += 2
+    ws.cell(row=row, column=1, value="5. Anomalias Detectadas").font = title_font
+    row += 1
+    headers = ["Conta", "Período", "Valor Antes", "Valor Depois", "Variação %", "Narrativa"]
     for i, h in enumerate(headers, start=1):
         ws.cell(row=row, column=i, value=h)
     style_header_row(ws, row, len(headers))
     row += 1
-    for adj in fin.get("ajustes_candidatos", []):
-        ws.cell(row=row, column=1, value=adj.get("descricao"))
-        ws.cell(row=row, column=2, value=adj.get("valor_estimado"))
-        ws.cell(row=row, column=3, value=adj.get("certeza"))
-        ws.cell(row=row, column=4, value=adj.get("motivo"))
+    for a in fin.get("anomalias", []):
+        ws.cell(row=row, column=1, value=a.get("conta")); ws.cell(row=row, column=2, value=a.get("periodo"))
+        ws.cell(row=row, column=3, value=a.get("valor_antes")); ws.cell(row=row, column=4, value=a.get("valor_depois"))
+        ws.cell(row=row, column=5, value=a.get("variacao_pct")); ws.cell(row=row, column=6, value=a.get("narrativa"))
         row += 1
+    if not fin.get("anomalias"):
+        ws.cell(row=row, column=1, value="Nenhuma anomalia detectada (ou sem série temporal suficiente para avaliar)")
+        row += 1
+
+    row += 2
+    ws.cell(row=row, column=1, value="6. Red Flags").font = title_font
     row += 1
-    ws.cell(row=row, column=1, value="Red flags").font = title_font
+    headers = ["Severidade", "Título", "Detalhe", "Valor"]
+    for i, h in enumerate(headers, start=1):
+        ws.cell(row=row, column=i, value=h)
+    style_header_row(ws, row, len(headers))
     row += 1
     for flag in fin.get("red_flags", []):
-        ws.cell(row=row, column=1, value=f"• {flag}"); row += 1
-    autosize(ws, [30, 45, 12, 55])
+        ws.cell(row=row, column=1, value=flag.get("severidade")); ws.cell(row=row, column=2, value=flag.get("titulo"))
+        ws.cell(row=row, column=3, value=flag.get("detalhe")); ws.cell(row=row, column=4, value=flag.get("valor"))
+        row += 1
+
+    row += 2
+    ws.cell(row=row, column=1, value="7. Perguntas para Due Diligence").font = title_font
+    row += 1
+    headers = ["Prioridade", "Pergunta", "Contexto"]
+    for i, h in enumerate(headers, start=1):
+        ws.cell(row=row, column=i, value=h)
+    style_header_row(ws, row, len(headers))
+    row += 1
+    for q in fin.get("perguntas_dd", []):
+        ws.cell(row=row, column=1, value=q.get("prioridade")); ws.cell(row=row, column=2, value=q.get("pergunta"))
+        ws.cell(row=row, column=3, value=q.get("contexto"))
+        row += 1
+
+    row += 2
+    kpis = fin.get("kpis_valuation") or {}
+    if kpis:
+        ws.cell(row=row, column=1, value="8. KPIs para Valuation").font = title_font
+        row += 1
+        for k, v in kpis.items():
+            ws.cell(row=row, column=1, value=k); ws.cell(row=row, column=2, value=v)
+            row += 1
+
+    limitacoes = fin.get("limitacoes_dados") or []
+    if limitacoes:
+        row += 2
+        ws.cell(row=row, column=1, value="Limitações dos dados disponíveis").font = title_font
+        row += 1
+        for lim in limitacoes:
+            cell = ws.cell(row=row, column=1, value=f"• {lim}")
+            cell.alignment = wrap
+            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
+            row += 1
+
+    autosize(ws, [26, 40, 16, 16, 12, 45])
 
     # 8. AI Audit Log --------------------------------------------------
     ws = wb.create_sheet("AI Audit Log")
@@ -457,15 +569,18 @@ def build_pptx(bundle: dict, path: str):
            fill_hex=DANGER if fin_result == "Crítico" else (WARN if fin_result == "Atenção" else SUCCESS), size=13)
 
     fin_lines = []
-    if financial.get("ebitda_normalizado") is not None:
-        fin_lines.append(f"EBITDA normalizado: {financial['ebitda_normalizado']:,}".replace(",", "."))
-    margem_trend = (financial.get("margens") or {}).get("tendencia")
-    if margem_trend:
-        fin_lines.append(f"Margem: {margem_trend}")
-    for flag in financial.get("red_flags", [])[:2]:
-        fin_lines.append(f"Red flag: {flag}")
+    dre = financial.get("resumo_dre") or {}
+    if dre.get("ebitda") is not None:
+        fin_lines.append(f"EBITDA: R$ {dre['ebitda']:,.0f} ({dre.get('margem_ebitda_pct', '?')}%)".replace(",", "."))
+    sim = financial.get("simulacao_cenario") or {}
+    if sim.get("aplica"):
+        fin_lines.append(f"{sim.get('descricao', 'Cenário simulado')}: margem cai de {sim.get('margem_atual_pct')}% para {sim.get('margem_simulada_pct')}%")
+    for a in (financial.get("anomalias") or [])[:2]:
+        fin_lines.append(f"Anomalia: {a.get('conta')} em {a.get('periodo')} ({a.get('narrativa', '')[:80]})")
+    for flag in (financial.get("red_flags") or [])[:2]:
+        fin_lines.append(f"Red flag ({flag.get('severidade')}): {flag.get('titulo')}")
     if fin_lines:
-        _add_bullets(s, MARGIN, Inches(2.2), Inches(5.8), Inches(3.5), fin_lines, size=15, space_after=14)
+        _add_bullets(s, MARGIN, Inches(2.2), Inches(5.8), Inches(3.5), fin_lines, size=14, space_after=12)
 
     parecer = opinion.get("parecer_do_time", "")
     _add_textbox(s, Inches(6.9), Inches(1.4), Inches(5.8), Inches(0.4), "PARECER DO TIME", size=14, bold=True, color=CORAL)
