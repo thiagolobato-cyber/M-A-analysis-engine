@@ -26,7 +26,7 @@ jobs:
           supabase functions deploy trigger-analysis --project-ref $PROJECT_ID --use-api --no-verify-jwt
           supabase functions deploy update-user-role --project-ref $PROJECT_ID --use-api --no-verify-jwt
           supabase functions deploy save-agent-prompt --project-ref $PROJECT_ID --use-api --no-verify-jwt
-          supabase functions deploy invite-user --project-ref $PROJECT_ID --use-api --no-verify-jwt
+          supabase functions deploy create-user --project-ref $PROJECT_ID --use-api --no-verify-jwt
 
       - name: Configurar os segredos que as funções usam em tempo de execução
         run: |
