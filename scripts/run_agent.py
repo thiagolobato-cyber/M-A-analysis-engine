@@ -307,7 +307,11 @@ def call_claude(system_prompt: str, deal_data: dict, other_outputs: dict | None 
         timeout=600,  # prompts grandes com Opus podem demorar mais que os 300s originais
     )
     if result.returncode != 0:
-        raise RuntimeError(f"claude -p saiu com erro: {result.stderr}")
+        raise RuntimeError(
+            f"claude -p saiu com código {result.returncode}\n"
+            f"--- stderr ---\n{result.stderr!r}\n"
+            f"--- stdout (primeiros 2000 chars) ---\n{result.stdout[:2000]!r}"
+        )
 
     # --output-format json do Claude Code envolve a resposta num envelope;
     # o campo com o texto do agente é "result" (confirmado no teste de 17/08).
