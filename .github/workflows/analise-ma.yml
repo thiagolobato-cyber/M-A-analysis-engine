@@ -9,6 +9,11 @@ on:
         description: "UUID do deal a analisar (tabela deals no Supabase)"
         required: true
         type: string
+      somente_extracao:
+        description: "Rodar SÓ o Agent 00 (Extraction) e parar — não segue pros outros 5 agentes nem pro CFO. Use pra testar sem gastar cota."
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   # ---- Agent 00 · Extraction (sequencial — os outros dependem do resultado dele) ----
@@ -34,7 +39,7 @@ jobs:
   # ---- Os 5 agentes em paralelo — "matrix" é o fan-out nativo do GitHub Actions ----
   analyze:
     needs: extract
-    if: always()   # roda mesmo se a extração (ainda placeholder) tropeçar
+    if: always() && github.event.inputs.somente_extracao != 'true'   # roda mesmo se a extração tropeçar, MAS não se o teste pediu só extração
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false   # um agente falhar não cancela os outros 4 — igual ao "Continue On Fail" do n8n
@@ -66,7 +71,7 @@ jobs:
   # (isso resolve, de um jeito mais simples, o mesmo risco que o Merge node do n8n tinha)
   synthesize:
     needs: analyze
-    if: always()
+    if: always() && github.event.inputs.somente_extracao != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -89,7 +94,7 @@ jobs:
   # GitHub Actions até o conector do Microsoft Drive (Fase 5) existir.
   generate_outputs:
     needs: synthesize
-    if: always() && needs.synthesize.result == 'success'
+    if: always() && needs.synthesize.result == 'success' && github.event.inputs.somente_extracao != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -119,7 +124,7 @@ jobs:
   # tem "if: always()") — só marcamos erro se a análise não fechou de vez.
   mark_failed:
     needs: [extract, analyze, synthesize]
-    if: always() && needs.synthesize.result != 'success'
+    if: always() && needs.synthesize.result != 'success' && github.event.inputs.somente_extracao != 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Marcar deal como error
