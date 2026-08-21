@@ -38,6 +38,14 @@ from dre_balancete_parser import (
     parse_consolidated_balancete,
     detect_dre_sheet,
     parse_dre_sheet,
+    calcular_ebitda_de_dre,
+    dre_linhas_para_contas,
+)
+from financial_engine import (
+    mapear_waterfall,
+    calcular_ebitda_3_camadas,
+    detectar_anomalias_run_rate,
+    detectar_contas_novas_ou_zeradas,
 )
 
 MAX_ROWS_PER_SHEET = 300
@@ -507,13 +515,43 @@ def main():
     agent_input = {"structured": deal_data.get("structured", {})}
     if args.agent in AGENTS_NEED_RAW_SERIES:
         raw = dict(deal_data.get("raw_extracted", {}))
+
+        # Motor determinístico (financial_engine.py + dre_balancete_parser.py):
+        # o Claude não recebe mais a série crua pra "descobrir" EBITDA e
+        # anomalia sozinho — código já calculou, ele só interpreta em poucas
+        # palavras o que já foi achado. Corta contexto de entrada E o
+        # "raciocínio" caro que o modelo fazia pra vasculhar 300+ contas.
+        dre_estruturada = raw.get("dre_estruturada") or {}
+        if dre_estruturada:
+            # DRE é a fonte PRIMÁRIA — já vem categorizada pela própria
+            # planilha da empresa, sem risco de duplicar hierarquia (ver
+            # 21/08: o waterfall reconstruído do Balancete cru precisou de
+            # 5 correções pra bater, a DRE bateu de primeira).
+            primeira_dre = next(iter(dre_estruturada.values()))
+            raw["ebitda_calculado"] = calcular_ebitda_de_dre(primeira_dre)
+            raw["anomalias_detectadas"] = detectar_anomalias_run_rate(
+                dre_linhas_para_contas(primeira_dre), top_n=10
+            )
+        else:
+            # Sem DRE própria no arquivo — cai pro Balancete cru como plano B.
+            series = raw.get("series_contabeis") or []
+            if series:
+                raw["waterfall_calculado"] = mapear_waterfall(series)
+                raw["ebitda_calculado"] = calcular_ebitda_3_camadas(
+                    raw["waterfall_calculado"], lucro_liquido=None,
+                    tributos_sobre_lucro=None, resultado_financeiro=None,
+                )
+                raw["anomalias_detectadas"] = detectar_anomalias_run_rate(series, top_n=10)
+
         series = raw.get("series_contabeis") or []
         if series:
-            selecionadas = select_relevant_accounts(series)
-            raw["series_contabeis"] = selecionadas
+            raw["contas_novas_ou_zeradas"] = detectar_contas_novas_ou_zeradas(series)
+            # A série crua completa não vai mais — o Claude já recebeu o que
+            # importa dela (anomalias + novas/zeradas) calculado acima.
+            raw.pop("series_contabeis", None)
             raw["series_contabeis_nota"] = (
-                f"{len(selecionadas)} de {len(series)} contas — selecionadas por "
-                "código (maior volatilidade mês a mês + materialidade), não por IA."
+                "Série crua não incluída — EBITDA e anomalias já calculados por código "
+                "(ver ebitda_calculado / anomalias_detectadas / contas_novas_ou_zeradas)."
             )
         agent_input["raw_extracted"] = raw
 
