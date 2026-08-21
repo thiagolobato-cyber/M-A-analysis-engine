@@ -82,7 +82,16 @@ def detect_consolidated_balancete(wb):
         col_descricao = next((i for i, v in enumerate(row_vals) if v in ("descrição", "descricao")), None)
         if col_descricao is None:
             col_descricao = next((i for i, v in enumerate(row_vals) if v == "conta"), None)
-        col_codigo = next((i for i, v in enumerate(row_vals) if v in ("código", "codigo", "nº", "no", "cód", "conta")), None)
+        # Prioridade importa: "código"/"cód"/"conta" são o código hierárquico
+        # de verdade; "nº"/"no" é numeração sequencial de linha (1, 2, 3...),
+        # não hierarquia — usar isso como código quebra qualquer lógica que
+        # dependa de prefixo (leaf detection, distinção ativo/passivo vs
+        # receita/despesa). Só cai pra "nº" se nada melhor existir.
+        col_codigo = next((i for i, v in enumerate(row_vals) if v in ("código", "codigo", "cód")), None)
+        if col_codigo is None:
+            col_codigo = next((i for i, v in enumerate(row_vals) if v == "conta" and i != col_descricao), None)
+        if col_codigo is None:
+            col_codigo = next((i for i, v in enumerate(row_vals) if v in ("nº", "no")), None)
         if col_descricao is None:
             continue
         return {
@@ -133,7 +142,10 @@ DRE_CATEGORIAS = [
     (re.compile(r"(?i)receita.*l[ií]quida"), "receita_liquida"),
     (re.compile(r"(?i)^cmv$|custo.*(servi|mercadoria|venda)"), "cmv"),
     (re.compile(r"(?i)total.*despesas?\s*operacionais?"), "despesas_operacionais_total"),
+    (re.compile(r"(?i)deprecia[çc][ãa]o|amortiza[çc][ãa]o"), "d_a"),
+    (re.compile(r"(?i)total.*resultado\s*financeiro|resultado\s*financeiro\s*l[íi]quido"), "resultado_financeiro"),
     (re.compile(r"(?i)resultado.*(ap[óo]s|antes).*(ir|csll)"), "resultado_liquido"),
+    (re.compile(r"(?i)irpj|csll|tributos?\s*sobre\s*(o\s*)?lucro"), "tributos_sobre_lucro"),
     (re.compile(r"(?i)margem\s*l[íi]quida"), "margem_liquida"),
 ]
 
@@ -172,6 +184,80 @@ def detect_dre_sheet(wb):
     return None
 
 
+def calcular_ebitda_de_dre(dre_estruturada: dict) -> dict:
+    """EBITDA a partir da DRE já parseada (fonte PRIMÁRIA e confiável — sem
+    risco de duplicar hierarquia, porque já veio como categoria de negócio,
+    não conta contábil crua). Usa só as categorias padronizadas que
+    `categorizar_linha_dre` já reconhece (ver dre_balancete_parser.py).
+
+    Convenção de sinal: `resultado_financeiro` é POSITIVO quando é receita
+    financeira líquida (convenção usada nas DREs testadas) — por isso EBITDA
+    SUBTRAI esse valor (removendo o efeito não-operacional do lucro líquido),
+    nunca soma. Testado contra dado real: bate exatamente com
+    (receita_líquida − despesas_operacionais_total + D&A).
+
+    Retorna None nos campos que a DRE não trouxe — nunca estima um valor que
+    não pode ser calculado com o dado disponível."""
+    def total_anual(chave):
+        linha = dre_estruturada.get(chave)
+        if not linha:
+            return None
+        valores = [v for v in linha.values() if isinstance(v, (int, float))]
+        return sum(valores) if valores else None
+
+    receita_liquida = total_anual("receita_liquida")
+    despesas_op = total_anual("despesas_operacionais_total")
+    d_a = total_anual("d_a") or 0.0
+    resultado_financeiro = total_anual("resultado_financeiro") or 0.0
+    tributos_sobre_lucro = total_anual("tributos_sobre_lucro") or 0.0
+    lucro_liquido = total_anual("resultado_liquido")
+
+    ebitda_bottom_up = None
+    if receita_liquida is not None and despesas_op is not None:
+        ebitda_bottom_up = round(receita_liquida - despesas_op + d_a, 2)
+
+    ebitda_top_down = None
+    if lucro_liquido is not None:
+        ebitda_top_down = round(lucro_liquido - resultado_financeiro + tributos_sobre_lucro + d_a, 2)
+
+    return {
+        "ebitda_bottom_up_receita_menos_despesas": ebitda_bottom_up,
+        "ebitda_top_down_lucro_liquido": ebitda_top_down,
+        "diferenca_bottom_vs_top": (
+            round(ebitda_bottom_up - ebitda_top_down, 2)
+            if ebitda_bottom_up is not None and ebitda_top_down is not None else None
+        ),
+        "margem_ebitda_pct": round(100 * ebitda_bottom_up / receita_liquida, 1) if ebitda_bottom_up and receita_liquida else None,
+    }
+
+
+# Chaves agregadas/derivadas — são o RESULTADO de outras linhas, não uma
+# causa-raiz. Apontar "resultado_liquido teve uma variação" não ajuda quem
+# lê a análise; a linha de despesa/receita específica por trás, sim.
+CHAVES_AGREGADAS_DRE = {
+    "receita_bruta", "impostos_sobre_receita", "receita_liquida", "cmv",
+    "despesas_operacionais_total", "resultado_financeiro",
+    "tributos_sobre_lucro", "resultado_liquido", "margem_liquida",
+}
+
+
+def dre_linhas_para_contas(dre_estruturada: dict, incluir_agregados: bool = False) -> list[dict]:
+    """Converte a DRE já parseada pro mesmo formato {conta, valores} que
+    select_relevant_accounts/detectar_anomalias_run_rate já esperam — permite
+    rodar a MESMA detecção de anomalia em cima das linhas já nomeadas da DRE
+    (menos ruído que a conta crua do Balancete, porque já vem categorizada
+    pela própria planilha da empresa).
+
+    Por padrão, exclui as linhas agregadas (receita_líquida, resultado_líquido
+    etc.) da lista — elas são o resultado de outras linhas, não uma causa-raiz
+    de anomalia. Passe `incluir_agregados=True` só se quiser os totais também
+    disponíveis pro Claude como contexto (não recomendado pra detecção)."""
+    itens = dre_estruturada.items()
+    if not incluir_agregados:
+        itens = [(nome, valores) for nome, valores in itens if nome not in CHAVES_AGREGADAS_DRE]
+    return [{"conta": nome, "codigo": None, "valores": valores} for nome, valores in itens]
+
+
 def parse_dre_sheet(wb, deteccao: dict, max_data_rows: int = 300) -> dict:
     """Extrai a DRE como {categoria_ou_rotulo_original: {mes_01: valor, ...}}.
     Linhas que batem numa categoria conhecida (DRE_CATEGORIAS) usam o nome
@@ -198,7 +284,4 @@ def parse_dre_sheet(wb, deteccao: dict, max_data_rows: int = 300) -> dict:
                     valores[f"mes_{mes_idx:02d}"] = v
         if not valores:
             continue
-        categoria = categorizar_linha_dre(rotulo_str)
-        chave = categoria or rotulo_str
-        linhas[chave] = valores
-    return linhas
+        categoria = categorizar_linha_dre(rotulo
