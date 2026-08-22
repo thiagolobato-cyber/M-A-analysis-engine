@@ -167,11 +167,17 @@ def build_excel(bundle: dict, path: str):
 
     # 2. Complexity -----------------------------------------------------
     ws = wb.create_sheet("Complexity")
+    if "score_total" in complexity:
+        ws["A1"] = "Score total (Bloco B)"; ws["B1"] = complexity.get("score_total")
+        ws["A2"] = "Classificação"; ws["B2"] = complexity.get("classificacao")
+        header_row = 4
+    else:
+        header_row = 1
     headers = ["Criterion", "Finding", "Impact", "Evidence"]
     for i, h in enumerate(headers, start=1):
-        ws.cell(row=1, column=i, value=h)
-    style_header_row(ws, 1, len(headers))
-    row = 2
+        ws.cell(row=header_row, column=i, value=h)
+    style_header_row(ws, header_row, len(headers))
+    row = header_row + 1
     for crit in complexity.get("criterios_acionados", []):
         ws.cell(row=row, column=1, value=crit.get("criterio"))
         ws.cell(row=row, column=2, value=crit.get("detalhe"))
@@ -245,100 +251,48 @@ def build_excel(bundle: dict, path: str):
     fin = agents.get("financial_analysis", {}).get("output", {}) or {}
     row = 1
 
-    dre = fin.get("resumo_dre") or {}
-    ws.cell(row=row, column=1, value="1. Resumo do DRE").font = title_font
+    bridge = fin.get("ebitda_bridge") or {}
+    ws.cell(row=row, column=1, value="1. EBITDA Bridge").font = title_font
     row += 1
-    dre_rows = [
-        ("Período", dre.get("periodo")), ("Receita Bruta", dre.get("receita_bruta")),
-        ("Impostos", dre.get("impostos")), ("Receita Líquida", dre.get("receita_liquida")),
-        ("Despesas Operacionais", dre.get("despesas_operacionais")), ("EBITDA", dre.get("ebitda")),
-        ("Margem EBITDA %", dre.get("margem_ebitda_pct")), ("Resultado Financeiro", dre.get("resultado_financeiro")),
-        ("Lucro Líquido", dre.get("lucro_liquido")), ("Margem Líquida %", dre.get("margem_liquida_pct")),
+    bridge_rows = [
+        ("Lucro Líquido", bridge.get("lucro_liquido")), ("Resultado Financeiro", bridge.get("resultado_financeiro")),
+        ("Tributos sobre Lucro", bridge.get("tributos_sobre_lucro")), ("D&A", bridge.get("d_a")),
+        ("EBITDA Reportado", bridge.get("ebitda_reportado")), ("Margem Reportada %", bridge.get("margem_reportada_pct")),
+        ("EBITDA Ajustado", bridge.get("ebitda_ajustado")), ("Margem Ajustada %", bridge.get("margem_ajustada_pct")),
     ]
-    for label, value in dre_rows:
+    for label, value in bridge_rows:
         ws.cell(row=row, column=1, value=label).font = Font(bold=True)
         ws.cell(row=row, column=2, value=value)
         row += 1
-    evolucao = dre.get("evolucao") or []
-    if evolucao:
+    ajustes = bridge.get("ajustes") or []
+    if ajustes:
         row += 1
-        ws.cell(row=row, column=1, value="Evolução por período").font = Font(bold=True)
+        ws.cell(row=row, column=1, value="Ajustes de não-recorrência").font = Font(bold=True)
         row += 1
-        for i, h in enumerate(["Período", "Receita Líquida", "EBITDA"], start=1):
-            ws.cell(row=row, column=i, value=h)
-        style_header_row(ws, row, 3)
-        row += 1
-        for p in evolucao:
-            ws.cell(row=row, column=1, value=p.get("periodo"))
-            ws.cell(row=row, column=2, value=p.get("receita_liquida"))
-            ws.cell(row=row, column=3, value=p.get("ebitda"))
+        for aj in ajustes:
+            ws.cell(row=row, column=1, value=aj.get("descricao"))
+            ws.cell(row=row, column=2, value=aj.get("valor"))
+            ws.cell(row=row, column=3, value=aj.get("justificativa"))
             row += 1
 
     row += 2
-    bal = fin.get("balanco_e_caixa") or {}
-    ws.cell(row=row, column=1, value="2. Balanço e Capital de Giro").font = title_font
+    ws.cell(row=row, column=1, value="2. Anomalias Detectadas").font = title_font
     row += 1
-    for label, value in [("Ativo Total", bal.get("ativo_total")), ("Passivo Total", bal.get("passivo_total")),
-                          ("Patrimônio Líquido", bal.get("patrimonio_liquido")), ("Liquidez Corrente", bal.get("liquidez_corrente")),
-                          ("Caixa Inicial", bal.get("caixa_inicial")), ("Caixa Final", bal.get("caixa_final")),
-                          ("Variação de Caixa %", bal.get("variacao_caixa_pct"))]:
-        ws.cell(row=row, column=1, value=label).font = Font(bold=True)
-        ws.cell(row=row, column=2, value=value)
-        row += 1
-
-    row += 2
-    pessoas = fin.get("estudo_pessoas") or {}
-    ws.cell(row=row, column=1, value="3. Estudo de Despesas com Pessoas").font = title_font
-    row += 1
-    if pessoas.get("aplica"):
-        for label, value in [("Custo total de pessoas", pessoas.get("custo_total_pessoas")),
-                              ("% da receita", pessoas.get("pct_da_receita")),
-                              ("Distribuição de lucros a sócios", pessoas.get("distribuicao_lucros_socios")),
-                              ("% do lucro", pessoas.get("pct_do_lucro")),
-                              ("% PJ da folha", pessoas.get("pct_pj_da_folha"))]:
-            ws.cell(row=row, column=1, value=label); ws.cell(row=row, column=2, value=value)
-            row += 1
-        for obs in pessoas.get("observacoes", []):
-            ws.cell(row=row, column=1, value=f"• {obs}"); row += 1
-    else:
-        ws.cell(row=row, column=1, value="Não aplicável — " + "; ".join(pessoas.get("observacoes", ["dado insuficiente"])))
-        row += 1
-
-    row += 2
-    sim = fin.get("simulacao_cenario") or {}
-    ws.cell(row=row, column=1, value="4. Simulação de Cenário").font = title_font
-    row += 1
-    if sim.get("aplica"):
-        ws.cell(row=row, column=1, value=sim.get("descricao", "")); row += 1
-        for premissa in sim.get("premissas", []):
-            ws.cell(row=row, column=1, value=f"Premissa: {premissa}"); row += 1
-        for label, value in [("Lucro atual", sim.get("lucro_atual")), ("Lucro simulado", sim.get("lucro_simulado")),
-                              ("Margem atual %", sim.get("margem_atual_pct")), ("Margem simulada %", sim.get("margem_simulada_pct"))]:
-            ws.cell(row=row, column=1, value=label).font = Font(bold=True); ws.cell(row=row, column=2, value=value)
-            row += 1
-    else:
-        ws.cell(row=row, column=1, value=sim.get("descricao", "Sem dado suficiente para simular cenário."))
-        row += 1
-
-    row += 2
-    ws.cell(row=row, column=1, value="5. Anomalias Detectadas").font = title_font
-    row += 1
-    headers = ["Conta", "Período", "Valor Antes", "Valor Depois", "Variação %", "Narrativa"]
+    headers = ["Conta", "Período", "Severidade", "Narrativa"]
     for i, h in enumerate(headers, start=1):
         ws.cell(row=row, column=i, value=h)
     style_header_row(ws, row, len(headers))
     row += 1
     for a in fin.get("anomalias", []):
         ws.cell(row=row, column=1, value=a.get("conta")); ws.cell(row=row, column=2, value=a.get("periodo"))
-        ws.cell(row=row, column=3, value=a.get("valor_antes")); ws.cell(row=row, column=4, value=a.get("valor_depois"))
-        ws.cell(row=row, column=5, value=a.get("variacao_pct")); ws.cell(row=row, column=6, value=a.get("narrativa"))
+        ws.cell(row=row, column=3, value=a.get("severidade")); ws.cell(row=row, column=4, value=a.get("narrativa"))
         row += 1
     if not fin.get("anomalias"):
         ws.cell(row=row, column=1, value="Nenhuma anomalia detectada (ou sem série temporal suficiente para avaliar)")
         row += 1
 
     row += 2
-    ws.cell(row=row, column=1, value="6. Red Flags").font = title_font
+    ws.cell(row=row, column=1, value="3. Red Flags").font = title_font
     row += 1
     headers = ["Severidade", "Título", "Detalhe", "Valor"]
     for i, h in enumerate(headers, start=1):
@@ -351,7 +305,7 @@ def build_excel(bundle: dict, path: str):
         row += 1
 
     row += 2
-    ws.cell(row=row, column=1, value="7. Perguntas para Due Diligence").font = title_font
+    ws.cell(row=row, column=1, value="4. Perguntas para Due Diligence").font = title_font
     row += 1
     headers = ["Prioridade", "Pergunta", "Contexto"]
     for i, h in enumerate(headers, start=1):
@@ -365,8 +319,7 @@ def build_excel(bundle: dict, path: str):
 
     row += 2
     kpis = fin.get("kpis_valuation") or {}
-    if kpis:
-        ws.cell(row=row, column=1, value="8. KPIs para Valuation").font = title_font
+    if kpis:        ws.cell(row=row, column=1, value="5. KPIs para Valuation").font = title_font
         row += 1
         for k, v in kpis.items():
             ws.cell(row=row, column=1, value=k); ws.cell(row=row, column=2, value=v)
@@ -384,6 +337,31 @@ def build_excel(bundle: dict, path: str):
             row += 1
 
     autosize(ws, [26, 40, 16, 16, 12, 45])
+
+    # 9. Viabilidade Financeira (Bloco A — 100% código, ver regras_negocio.py)
+    ws = wb.create_sheet("Viabilidade Financeira")
+    vf = agents.get("viabilidade_financeira", {}).get("output", {}) or {}
+    ws["A1"] = "Classificação"; ws["A1"].font = title_font
+    ws["B1"] = vf.get("classificacao", "não avaliado")
+    row = 3
+    ws.cell(row=row, column=1, value="Critério").font = title_font
+    ws.cell(row=row, column=2, value="Faixa").font = title_font
+    row += 1
+    for criterio, faixa in (vf.get("criterios") or {}).items():
+        ws.cell(row=row, column=1, value=criterio)
+        ws.cell(row=row, column=2, value=faixa or "não avaliado")
+        row += 1
+    row += 1
+    ws.cell(row=row, column=1, value="Perfil restrito presente?")
+    ws.cell(row=row, column=2, value=vf.get("perfil_restrito_presente"))
+    row += 1
+    if vf.get("criterios_nao_avaliados"):
+        row += 1
+        ws.cell(row=row, column=1, value="Critérios não avaliados (dado ausente)").font = Font(bold=True)
+        row += 1
+        for c in vf.get("criterios_nao_avaliados", []):
+            ws.cell(row=row, column=1, value=f"• {c}"); row += 1
+    autosize(ws, [32, 24])
 
     # 8. AI Audit Log --------------------------------------------------
     ws = wb.create_sheet("AI Audit Log")
@@ -661,9 +639,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     os.makedirs("output", exist_ok=True)
-    bundle = fetch_deal_bundle(args.deal_id)
-
-    excel_path = f"output/{args.deal_id}_analise.xlsx"
+    bundle = fetch_deal_bundle(args.deal_id)    excel_path = f"output/{args.deal_id}_analise.xlsx"
     pptx_path = f"output/{args.deal_id}_executivo.pptx"
     build_excel(bundle, excel_path)
     build_pptx(bundle, pptx_path)
