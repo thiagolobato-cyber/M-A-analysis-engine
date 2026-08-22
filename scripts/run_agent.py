@@ -47,6 +47,9 @@ from financial_engine import (
     detectar_anomalias_run_rate,
     detectar_contas_novas_ou_zeradas,
 )
+from complexity_rules import classificar_complexidade
+from formulario_mapper import detectar_e_extrair_formulario, mapear_formulario
+from regras_negocio import avaliar_viabilidade_financeira, avaliar_complexidade_operacional, calcular_margem_bruta
 
 MAX_ROWS_PER_SHEET = 300
 MAX_COLS_PER_SHEET = 40
@@ -215,8 +218,24 @@ def excel_to_text(file_bytes: bytes, filename: str) -> tuple[str, list, dict]:
         if dre_linhas:
             parts.append(format_dre_table(dre_linhas))
 
-    sheet_names = [s for s in wb.sheetnames if s not in skip_sheets][:MAX_SHEETS]
-    if len(wb.sheetnames) - len(skip_sheets) > MAX_SHEETS:
+    # Se já tiramos dado financeiro estruturado (DRE ou Balancete) deste
+    # arquivo, as abas que sobram (Menu, CMV, Despesas, R.F., DFC,
+    # Inventário, etc.) hoje não alimentam nada no pipeline — o
+    # financial_analysis só lê dre_estruturada/series_contabeis. Confirmado
+    # com o Thiago em 21/08: cortar o despejo cru delas, custo sem retorno.
+    # Se algum dia precisarmos (análise de pessoal/fluxo de caixa detalhado),
+    # a resposta certa é escrever um parser dedicado pra elas, não reativar
+    # o despejo cru.
+    houve_extracao_estruturada = bool(consolidado) or bool(dre_deteccao)
+    sheet_names = [] if houve_extracao_estruturada else [s for s in wb.sheetnames if s not in skip_sheets][:MAX_SHEETS]
+    abas_nao_incluidas = [s for s in wb.sheetnames if s not in skip_sheets] if houve_extracao_estruturada else []
+    if abas_nao_incluidas:
+        parts.append(
+            f"(outras {len(abas_nao_incluidas)} abas deste arquivo não incluídas — "
+            f"{', '.join(abas_nao_incluidas[:8])}{'...' if len(abas_nao_incluidas) > 8 else ''} — "
+            "não alimentam o pipeline hoje; avisar se precisar do conteúdo delas.)"
+        )
+    if len(wb.sheetnames) - len(skip_sheets) > MAX_SHEETS and not houve_extracao_estruturada:
         parts.append(f"(arquivo tem mais abas — mostrando as primeiras {MAX_SHEETS} além da série mensal/DRE)")
 
     for sheet_name in sheet_names:
@@ -315,6 +334,7 @@ def run_extraction(deal_id: str):
     raw_bytes_for_checksum = b""
     code_computed_series = []  # preenchido diretamente pelo código, não pelo LLM
     code_computed_dre = {}     # idem, pela mesma razão
+    code_computed_formulario_raw = None  # idem — respostas canônicas do formulário, se reconhecido
     for f in files:
         try:
             content = download_from_storage(f["storage_ref"])
@@ -323,6 +343,23 @@ def run_extraction(deal_id: str):
             continue
         raw_bytes_for_checksum += content
         filename = f["original_filename"] or f["storage_ref"]
+
+        # Formulário do parceiro: cabeçalho fixo, reconhecido por palavra-
+        # chave (ver formulario_mapper.py). Se reconhecer, processa 100% em
+        # código e NUNCA manda o conteúdo cru pro Claude — é a maior fatia
+        # de redução de token desta rodada (confirmado com o Thiago em
+        # 21/08: "o impacto agora em tokens deve ser gigantesco").
+        formulario_detectado = detectar_e_extrair_formulario(content)
+        if formulario_detectado is not None:
+            code_computed_formulario_raw = formulario_detectado
+            combined_text.append(
+                f"===== ARQUIVO: {filename} =====\n"
+                f"(Formulário do parceiro reconhecido e processado 100% em código — "
+                f"{len(formulario_detectado)} campos extraídos por palavra-chave, sem IA. "
+                "Conteúdo não incluído aqui de propósito, pra não gastar token com o que "
+                "o código já resolveu sozinho.)"
+            )
+            continue
 
         texto, contas, dre = excel_to_text(content, filename)
         combined_text.append(texto)
@@ -352,6 +389,59 @@ def run_extraction(deal_id: str):
         output.setdefault("raw_extracted", {})["series_contabeis"] = code_computed_series
     if code_computed_dre:
         output.setdefault("raw_extracted", {})["dre_estruturada"] = code_computed_dre
+
+    if code_computed_formulario_raw is not None:
+        # RBT12 real, a partir da receita bruta de 12 meses já extraída da
+        # DRE — muito mais confiável que aproximar por faturamento_mensal
+        # × 12 (decisão do Thiago em 21/08: "pegaremos na DRE"). Só cai pra
+        # aproximação se não existir DRE nesse deal.
+        rbt12_real = None
+        if code_computed_dre:
+            primeira_dre = next(iter(code_computed_dre.values()))
+            linha_receita_bruta = primeira_dre.get("receita_bruta")
+            if linha_receita_bruta:
+                valores_rb = [v for v in linha_receita_bruta.values() if isinstance(v, (int, float))]
+                if valores_rb:
+                    rbt12_real = sum(valores_rb)
+
+        mapeado = mapear_formulario(code_computed_formulario_raw, rbt12_real=rbt12_real)
+
+        # Bloco A e B já calculados aqui, na extração — Complexity e
+        # Viabilidade Financeira (agentes separados) só vão COPIAR isto
+        # pra agent_runs depois, sem recalcular nada.
+        margem = calcular_margem_bruta(
+            mapeado["faturamento_mensal"], mapeado["folha_informada"], mapeado["custo_sistemas"],
+            mapeado["regime_tributario"], mapeado["rbt12"],
+        )
+        custo_folha_pct = (
+            100 * mapeado["folha_informada"] / mapeado["faturamento_mensal"]
+            if mapeado["faturamento_mensal"] else None
+        )
+        bloco_a = avaliar_viabilidade_financeira(
+            margem["margem_bruta_pct"], custo_folha_pct,
+            mapeado["inadimplencia_media_pct"], mapeado["churn_medio_pct"], mapeado["perfil_restrito_presente"],
+        )
+        custo_sistemas_pct = (
+            100 * mapeado["custo_sistemas"] / mapeado["faturamento_mensal"]
+            if mapeado["faturamento_mensal"] else None
+        )
+        bloco_b = avaliar_complexidade_operacional(
+            custo_sistemas_pct, mapeado["localizacao_fora_grande_sp"],
+            mapeado["numero_clientes"], mapeado["numero_colaboradores"],
+            mapeado["concentracao_top10_pct"], mapeado["segmentos_sensiveis_presentes"],
+            mapeado["sistema_financeiro_e_omie"], mapeado["sistema_utilizado_texto"],
+            mapeado["sistema_hospedagem"], mapeado["outsourcing_pessoas_pct"], mapeado["outsourcing_sistemas_pct"],
+        )
+
+        output.setdefault("structured", {}).update(
+            {k: v for k, v in mapeado.items() if k != "avisos_mapeamento"}
+        )
+        output.setdefault("raw_extracted", {})["margem_bruta_calculada"] = margem
+        output.setdefault("raw_extracted", {})["viabilidade_financeira_calculada"] = bloco_a
+        output.setdefault("raw_extracted", {})["complexidade_operacional_calculada"] = bloco_b.to_agent_run_output()
+        if mapeado["avisos_mapeamento"]:
+            output.setdefault("avisos", [])
+            output["avisos"].extend(mapeado["avisos_mapeamento"])
 
     deal_data_row = supabase_request("POST", "deal_data", {
         "deal_id": deal_id,
@@ -576,10 +666,27 @@ def main():
             if r.get("agent_versions", {}).get("agents", {}).get("name")
         }
 
-    output = call_claude(
-        agent_version["system_prompt"], agent_input, other_outputs,
-        model=agent_version.get("model"),
-    )
+    if args.agent == "complexity":
+        # Bloco B já foi calculado na extração (run_extraction), a partir
+        # do formulário processado 100% em código — aqui só copiamos pra
+        # agent_runs, sem recalcular e sem chamada de rede.
+        output = deal_data.get("raw_extracted", {}).get("complexidade_operacional_calculada")
+        if output is None:
+            # Sem formulário reconhecido nesse deal — fallback pro motor
+            # antigo (mais simples), lendo os campos que a extração possa
+            # ter preenchido via LLM em vez do formulário.
+            resultado = classificar_complexidade(deal_data.get("structured", {}))
+            output = resultado.to_agent_run_output()
+    elif args.agent == "viabilidade_financeira":
+        # Idem — Bloco A já calculado na extração, zero chamada de rede.
+        output = deal_data.get("raw_extracted", {}).get("viabilidade_financeira_calculada")
+        if output is None:
+            output = {"classificacao": "Dados insuficientes", "motivo": "Formulário não reconhecido nesse deal — sem Bloco A calculado."}
+    else:
+        output = call_claude(
+            agent_version["system_prompt"], agent_input, other_outputs,
+            model=agent_version.get("model"),
+        )
 
     row = {
         "deal_id": args.deal_id,
