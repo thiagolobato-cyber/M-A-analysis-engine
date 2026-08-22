@@ -319,7 +319,8 @@ def build_excel(bundle: dict, path: str):
 
     row += 2
     kpis = fin.get("kpis_valuation") or {}
-    if kpis:        ws.cell(row=row, column=1, value="5. KPIs para Valuation").font = title_font
+    if kpis:
+        ws.cell(row=row, column=1, value="5. KPIs para Valuation").font = title_font
         row += 1
         for k, v in kpis.items():
             ws.cell(row=row, column=1, value=k); ws.cell(row=row, column=2, value=v)
@@ -639,7 +640,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     os.makedirs("output", exist_ok=True)
-    bundle = fetch_deal_bundle(args.deal_id)    excel_path = f"output/{args.deal_id}_analise.xlsx"
+    bundle = fetch_deal_bundle(args.deal_id)
+
+    excel_path = f"output/{args.deal_id}_analise.xlsx"
     pptx_path = f"output/{args.deal_id}_executivo.pptx"
     build_excel(bundle, excel_path)
     build_pptx(bundle, pptx_path)
