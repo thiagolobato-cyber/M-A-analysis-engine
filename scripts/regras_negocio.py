@@ -228,6 +228,78 @@ class ComplexidadeOperacionalResultado:
         }
 
 
+def avaliar_riscos_operacionais(mapeado: dict) -> dict:
+    """Substitui o agente `operational_risks` (LLM) — CONFIRMADO em 24/08
+    lendo o prompt real dele no Supabase: todo critério numérico que ele
+    calculava (concentração top 10, composição da carteira, risco de
+    pessoa-chave via headcount, uso de sistema do cliente, inadimplência)
+    já é produzido pelo Bloco A/B, de graça. Esta função só reempacota
+    esse dado no schema que `generate_outputs.py` já espera
+    (`concentracao_receita_top10_pct`, `nivel_concentracao`,
+    `riscos_operacionais`), sem chamar IA.
+
+    ATENÇÃO — gap de dado real, não escondido: o prompt original também
+    perguntava sobre "bloqueios judiciais/fiscais/bancários", que não
+    existe em nenhum lugar do formulário nem do Bloco A/B hoje. Fica
+    registrado em `riscos_operacionais` como item explícito de dado
+    ausente — não fingimos que essa pergunta foi respondida."""
+    concentracao = mapeado.get("concentracao_top10_pct")
+    nivel_concentracao = (
+        "Crítico" if concentracao is not None and concentracao > 35
+        else "Médio" if concentracao is not None and concentracao > 25
+        else "Baixo" if concentracao is not None else None
+    )
+
+    riscos = []
+    if nivel_concentracao == "Crítico":
+        riscos.append(
+            f"Concentração de receita nos 10 maiores clientes = {concentracao}% "
+            "(>35%, crítico) — saída de 1-2 contas relevantes teria impacto material imediato."
+        )
+    elif nivel_concentracao == "Médio":
+        riscos.append(f"Concentração de receita nos 10 maiores clientes = {concentracao}% (>25%, atenção).")
+
+    if mapeado.get("segmentos_sensiveis_presentes"):
+        riscos.append("Carteira inclui segmento(s) com operação contábil mais complexa (indústria/associação/hospital/ensino).")
+
+    numero_clientes = mapeado.get("numero_clientes")
+    numero_colaboradores = mapeado.get("numero_colaboradores")
+    if numero_clientes is not None and numero_colaboradores:
+        ratio = numero_clientes / numero_colaboradores
+        if ratio < 15:
+            riscos.append(
+                f"Razão clientes/colaboradores = {ratio:.1f} — headcount baixo para o volume "
+                "de clientes pode indicar dependência de poucas pessoas-chave."
+            )
+
+    if mapeado.get("sistema_financeiro_e_omie") is False:
+        riscos.append("Opera em sistema do cliente além de Omie/Conta Azul — risco operacional contínuo, não só de migração.")
+
+    inadimplencia = mapeado.get("inadimplencia_media_pct")
+    if inadimplencia is not None and inadimplencia > 7:
+        riscos.append(f"Inadimplência média = {inadimplencia}% (>7%, crítico).")
+
+    riscos.append(
+        "Bloqueios judiciais/fiscais/bancários: não avaliado — não existe pergunta "
+        "sobre isso no formulário atual nem em nenhuma fonte de dado hoje."
+    )
+
+    return {
+        "concentracao_receita_top10_pct": concentracao,
+        "nivel_concentracao": nivel_concentracao or "não avaliado",
+        "composicao_carteira": {"industria_pct": None, "servico_pct": None, "comercio_pct": None, "outros_pct": None},
+        "risco_pessoa_chave": {
+            "sinalizado": bool(numero_clientes is not None and numero_colaboradores and numero_clientes / numero_colaboradores < 15),
+            "motivo": "Razão clientes/colaboradores abaixo de 15" if numero_clientes and numero_colaboradores and numero_clientes / numero_colaboradores < 15 else None,
+        },
+        "riscos_operacionais": riscos,
+        "confidence": 0.6,  # nunca 1.0 — "bloqueios" é sempre um gap conhecido
+        "evidence": [{"campo": "concentracao_top10_pct", "valor": str(concentracao)}],
+        "source": "rule_engine_operational_risks_v1",
+    }
+
+
+
 def avaliar_complexidade_operacional(
     custo_sistemas_pct_faturamento: float | None,
     localizacao_fora_grande_sp: bool | None,
