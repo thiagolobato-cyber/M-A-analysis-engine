@@ -548,12 +548,11 @@ def build_pptx(bundle: dict, path: str):
            fill_hex=DANGER if fin_result == "Crítico" else (WARN if fin_result == "Atenção" else SUCCESS), size=13)
 
     fin_lines = []
-    dre = financial.get("resumo_dre") or {}
-    if dre.get("ebitda") is not None:
-        fin_lines.append(f"EBITDA: R$ {dre['ebitda']:,.0f} ({dre.get('margem_ebitda_pct', '?')}%)".replace(",", "."))
-    sim = financial.get("simulacao_cenario") or {}
-    if sim.get("aplica"):
-        fin_lines.append(f"{sim.get('descricao', 'Cenário simulado')}: margem cai de {sim.get('margem_atual_pct')}% para {sim.get('margem_simulada_pct')}%")
+    bridge = financial.get("ebitda_bridge") or {}
+    if bridge.get("ebitda_reportado") is not None:
+        fin_lines.append(f"EBITDA: R$ {bridge['ebitda_reportado']:,.0f} ({bridge.get('margem_reportada_pct', '?')}%)".replace(",", "."))
+    if bridge.get("ajustes"):
+        fin_lines.append(f"EBITDA Ajustado: R$ {bridge.get('ebitda_ajustado', 0):,.0f} ({len(bridge['ajustes'])} ajuste(s) de não-recorrência)".replace(",", "."))
     for a in (financial.get("anomalias") or [])[:2]:
         fin_lines.append(f"Anomalia: {a.get('conta')} em {a.get('periodo')} ({a.get('narrativa', '')[:80]})")
     for flag in (financial.get("red_flags") or [])[:2]:
