@@ -30,10 +30,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
-# Segmentos que, segundo o critério original, tornam a carteira mais
-# exigente operacionalmente (indústrias, associações, hospitais,
-# instituições de ensino) — mesmos valores que o Agent 00 deve devolver
-# em `segmentos_sensiveis_top10_clientes` (ver extraction_prompt_addition.txt).
 SEGMENTOS_MEDIA_COMPLEXIDADE = {"industria", "associacao", "hospital", "instituicao_de_ensino"}
 
 
@@ -44,16 +40,19 @@ class ComplexidadeResultado:
     criterios_nao_avaliados: list[str] = field(default_factory=list)
 
     def to_agent_run_output(self) -> dict:
-        """Formato compatível com o que o agente de IA devolvia — pra não
-        quebrar o generate_outputs.py, que lê agents['complexity']['output']."""
+        """Formato compatível com o que o agente de IA devolvia — confirmado
+        contra generate_outputs.py (que lê `classificacao` e
+        `criterios_acionados`, não `result`/`findings` — schema real, não o
+        que eu tinha suposto numa primeira versão)."""
         return {
-            "result": self.nivel,
+            "classificacao": self.nivel,
             "confidence": 1.0 if not self.criterios_nao_avaliados else 0.6,
-            "findings": self.motivos,
-            "drivers": self.motivos,
-            "risks": [],
+            "criterios_acionados": [
+                {"criterio": m, "detalhe": m, "nivel_apontado": self.nivel}
+                for m in self.motivos
+            ],
             "evidence": [{"criterio": m} for m in self.motivos],
-            "source": "rule_engine_complexity_v1",  # não "agent_complexity" — deixa claro que não passou por LLM
+            "source": "rule_engine_complexity_v1",
             "criterios_nao_avaliados": self.criterios_nao_avaliados,
         }
 
@@ -68,7 +67,6 @@ def classificar_complexidade(structured: dict) -> ComplexidadeResultado:
     motivos_media: list[str] = []
     nao_avaliados: list[str] = []
 
-    # --- Critério 1: localização ---
     fora_grande_sp = structured.get("localizacao_fora_grande_sp")
     if fora_grande_sp is True:
         motivos_alta.append(
@@ -78,7 +76,6 @@ def classificar_complexidade(structured: dict) -> ComplexidadeResultado:
     elif fora_grande_sp is None:
         nao_avaliados.append("localizacao_fora_grande_sp")
 
-    # --- Critério 2: sistema de ERP contábil não é o Domínio ---
     sistema_e_dominio = structured.get("sistema_e_dominio")
     if sistema_e_dominio is False:
         motivos_alta.append(
@@ -87,14 +84,12 @@ def classificar_complexidade(structured: dict) -> ComplexidadeResultado:
     elif sistema_e_dominio is None:
         nao_avaliados.append("sistema_e_dominio")
 
-    # --- Critério 3: hospedagem em servidor físico (revisado 20/08: Média, não Alta) ---
     hospedagem = structured.get("sistema_hospedagem")
     if hospedagem == "servidor_fisico":
         motivos_media.append("Sistema hospedado em servidor físico (não em nuvem/web).")
     elif hospedagem is None:
         nao_avaliados.append("sistema_hospedagem")
 
-    # --- Critério 4: sistema financeiro diferente do Omie (revisado 20/08: Média, não Alta) ---
     sistema_financeiro_omie = structured.get("sistema_financeiro_e_omie")
     if sistema_financeiro_omie is False:
         motivos_media.append(
@@ -103,7 +98,6 @@ def classificar_complexidade(structured: dict) -> ComplexidadeResultado:
     elif sistema_financeiro_omie is None:
         nao_avaliados.append("sistema_financeiro_e_omie")
 
-    # --- Critério 5: razão clientes ÷ headcount operacional ---
     numero_clientes = structured.get("numero_clientes")
     numero_colaboradores = structured.get("numero_colaboradores")
     if numero_clientes is not None and numero_colaboradores:
@@ -119,7 +113,6 @@ def classificar_complexidade(structured: dict) -> ComplexidadeResultado:
     else:
         nao_avaliados.append("numero_clientes ou numero_colaboradores")
 
-    # --- Critério 6: concentração de receita (Pareto top 10) ---
     concentracao = structured.get("porcentagem_faturamento_top_10_clientes")
     if concentracao is not None:
         if concentracao > 35:
@@ -129,7 +122,6 @@ def classificar_complexidade(structured: dict) -> ComplexidadeResultado:
     else:
         nao_avaliados.append("porcentagem_faturamento_top_10_clientes")
 
-    # --- Critério 7: segmento sensível entre os top 10 clientes ---
     segmentos = set(structured.get("segmentos_sensiveis_top10_clientes") or [])
     if segmentos & SEGMENTOS_MEDIA_COMPLEXIDADE:
         motivos_media.append(
@@ -143,8 +135,6 @@ def classificar_complexidade(structured: dict) -> ComplexidadeResultado:
     elif motivos_media:
         nivel = "Média complexidade"
     elif nao_avaliados and not (motivos_alta or motivos_media):
-        # Dado insuficiente pra confirmar baixa com segurança — mesma lógica
-        # de "insufficient evidence" que já existe no CFO Agent, aplicada aqui.
         nivel = "Dados insuficientes"
     else:
         nivel = "Baixa complexidade"
