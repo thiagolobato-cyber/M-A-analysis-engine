@@ -258,6 +258,7 @@ def dre_linhas_para_contas(dre_estruturada: dict, incluir_agregados: bool = Fals
     return [{"conta": nome, "codigo": None, "valores": valores} for nome, valores in itens]
 
 
+
 def parse_dre_sheet(wb, deteccao: dict, max_data_rows: int = 300) -> dict:
     """Extrai a DRE como {categoria_ou_rotulo_original: {mes_01: valor, ...}}.
     Linhas que batem numa categoria conhecida (DRE_CATEGORIAS) usam o nome
@@ -284,4 +285,7 @@ def parse_dre_sheet(wb, deteccao: dict, max_data_rows: int = 300) -> dict:
                     valores[f"mes_{mes_idx:02d}"] = v
         if not valores:
             continue
-        categoria = categorizar_linha_dre(rotulo
+        categoria = categorizar_linha_dre(rotulo_str)
+        chave = categoria or rotulo_str
+        linhas[chave] = valores
+    return linhas
