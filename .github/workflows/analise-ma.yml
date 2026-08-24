@@ -50,6 +50,7 @@ jobs:
           - integration_risks
           - operational_risks
           - financial_analysis
+          - viabilidade_financeira
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
