@@ -49,7 +49,7 @@ from financial_engine import (
 )
 from complexity_rules import classificar_complexidade
 from formulario_mapper import detectar_e_extrair_formulario, mapear_formulario
-from regras_negocio import avaliar_viabilidade_financeira, avaliar_complexidade_operacional, calcular_margem_bruta
+from regras_negocio import avaliar_viabilidade_financeira, avaliar_complexidade_operacional, avaliar_riscos_operacionais, calcular_margem_bruta
 
 MAX_ROWS_PER_SHEET = 300
 MAX_COLS_PER_SHEET = 40
@@ -439,6 +439,7 @@ def run_extraction(deal_id: str):
         output.setdefault("raw_extracted", {})["margem_bruta_calculada"] = margem
         output.setdefault("raw_extracted", {})["viabilidade_financeira_calculada"] = bloco_a
         output.setdefault("raw_extracted", {})["complexidade_operacional_calculada"] = bloco_b.to_agent_run_output()
+        output.setdefault("raw_extracted", {})["riscos_operacionais_calculados"] = avaliar_riscos_operacionais(mapeado)
         if mapeado["avisos_mapeamento"]:
             output.setdefault("avisos", [])
             output["avisos"].extend(mapeado["avisos_mapeamento"])
@@ -682,6 +683,15 @@ def main():
         output = deal_data.get("raw_extracted", {}).get("viabilidade_financeira_calculada")
         if output is None:
             output = {"classificacao": "Dados insuficientes", "motivo": "Formulário não reconhecido nesse deal — sem Bloco A calculado."}
+    elif args.agent == "operational_risks":
+        # Aposentado em 24/08: todo critério numérico que este agente
+        # calculava (concentração top 10, headcount vs. carteira, sistema
+        # do cliente, inadimplência) já existe no Bloco A/B, de graça —
+        # confirmado lendo o prompt real dele no Supabase antes de decidir.
+        # Ver avaliar_riscos_operacionais() em regras_negocio.py.
+        output = deal_data.get("raw_extracted", {}).get("riscos_operacionais_calculados")
+        if output is None:
+            output = {"nivel_concentracao": "não avaliado", "riscos_operacionais": ["Formulário não reconhecido nesse deal."]}
     else:
         output = call_claude(
             agent_version["system_prompt"], agent_input, other_outputs,
