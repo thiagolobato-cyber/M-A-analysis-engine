@@ -281,10 +281,12 @@ def avaliar_riscos_integracao(mapeado: dict) -> dict:
         )
     if outsourcing_sistemas_pct is not None and outsourcing_sistemas_pct > 15:
         riscos.append(f"Outsourcing de sistemas do cliente = {outsourcing_sistemas_pct}% (>15%, alto).")
-    elif possui_outsourcing:
+    elif outsourcing_sistemas_pct is not None and outsourcing_sistemas_pct > 0:
         riscos.append(f"Outsourcing de sistemas do cliente presente ({outsourcing_sistemas_pct}%) — contrato a mapear na integração.")
     if outsourcing_pessoas_pct is not None and outsourcing_pessoas_pct > 15:
         riscos.append(f"Outsourcing de pessoas alocadas no cliente = {outsourcing_pessoas_pct}% (>15%, alto).")
+    elif outsourcing_pessoas_pct is not None and outsourcing_pessoas_pct > 0:
+        riscos.append(f"Outsourcing de pessoas alocadas no cliente presente ({outsourcing_pessoas_pct}%) — contrato a mapear na integração.")
 
     # 3 níveis, igual ao schema original ("Baixo|Médio|Alto") — antes esta
     # função só tinha 2 níveis, corrigido depois de ler o prompt real.
