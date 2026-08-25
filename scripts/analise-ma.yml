@@ -1,0 +1,150 @@
+name: Análise de M&A
+
+# Dispara sob demanda: botão "Run workflow" no GitHub, ou via API
+# (é isso que vira o botão "Analisar" no site da Fase 7 mais pra frente).
+on:
+  workflow_dispatch:
+    inputs:
+      deal_id:
+        description: "UUID do deal a analisar (tabela deals no Supabase)"
+        required: true
+        type: string
+      somente_extracao:
+        description: "Rodar SÓ o Agent 00 (Extraction) e parar — não segue pros outros 5 agentes nem pro CFO. Use pra testar sem gastar cota."
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  # ---- Agent 00 · Extraction (sequencial — os outros dependem do resultado dele) ----
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar Claude Code
+        run: curl -fsSL https://claude.ai/install.sh | bash
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+      - name: Extrair dados do deal
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DEAL_ID: ${{ inputs.deal_id }}
+        run: python scripts/run_agent.py --agent extraction --deal-id "$DEAL_ID"
+
+  # ---- Os 5 agentes em paralelo — "matrix" é o fan-out nativo do GitHub Actions ----
+  analyze:
+    needs: extract
+    if: always() && github.event.inputs.somente_extracao != 'true'   # roda mesmo se a extração tropeçar, MAS não se o teste pediu só extração
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false   # um agente falhar não cancela os outros 4 — igual ao "Continue On Fail" do n8n
+      matrix:
+        agent:
+          - complexity
+          - opinion
+          - integration_risks   # 100% código desde 24/08 (ver run_agent.py) — zero custo de IA
+          - operational_risks
+          - financial_analysis
+          - viabilidade_financeira
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar Claude Code
+        run: curl -fsSL https://claude.ai/install.sh | bash
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+      - name: Rodar agente ${{ matrix.agent }}
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DEAL_ID: ${{ inputs.deal_id }}
+        run: python scripts/run_agent.py --agent "${{ matrix.agent }}" --deal-id "$DEAL_ID"
+
+  # ---- CFO Synthesis — "if: always()" garante que roda mesmo se 1 dos 5 falhou ----
+  # (isso resolve, de um jeito mais simples, o mesmo risco que o Merge node do n8n tinha)
+  synthesize:
+    needs: analyze
+    if: always() && github.event.inputs.somente_extracao != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar Claude Code
+        run: curl -fsSL https://claude.ai/install.sh | bash
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+      - name: CFO Synthesis
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DEAL_ID: ${{ inputs.deal_id }}
+        run: python scripts/run_agent.py --agent cfo_synthesis --deal-id "$DEAL_ID"
+
+  # ---- Output Generator (Fase 6) — disponível para download direto no
+  # GitHub Actions até o conector do Microsoft Drive (Fase 5) existir.
+  generate_outputs:
+    needs: synthesize
+    if: always() && needs.synthesize.result == 'success' && github.event.inputs.somente_extracao != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+      - name: Gerar Excel + PPT
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DEAL_ID: ${{ inputs.deal_id }}
+        run: python scripts/generate_outputs.py --deal-id "$DEAL_ID"
+      - name: Disponibilizar para download (interino, até o Microsoft Drive)
+        uses: actions/upload-artifact@v4
+        with:
+          name: analise-${{ inputs.deal_id }}
+          path: output/
+
+  # ---- Marca o deal como "error" se algo essencial falhou — sem isso, o
+  # status ficava preso em "processing" pra sempre, sem nenhum sinal visível
+  # na tela de que a análise não vai completar sozinha.
+  #
+  # Só depende do resultado do "synthesize", não do "analyze": 1 dos 5
+  # agentes falhar é tolerado de propósito (é para isso que o CFO Synthesis
+  # tem "if: always()") — só marcamos erro se a análise não fechou de vez.
+  mark_failed:
+    needs: [extract, analyze, synthesize]
+    if: always() && needs.synthesize.result != 'success' && github.event.inputs.somente_extracao != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Marcar deal como error
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DEAL_ID: ${{ inputs.deal_id }}
+        run: |
+          http_code=$(curl -s -o /tmp/resp.txt -w "%{http_code}" -X PATCH "$SUPABASE_URL/rest/v1/deals?id=eq.$DEAL_ID" \
+            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"status": "error"}')
+          echo "HTTP status: $http_code"
+          cat /tmp/resp.txt
+          # Este job é best-effort — não deixa o workflow ficar vermelho por
+          # causa dele; o que importa é ter tentado marcar o status.
+          exit 0
+          retention-days: 90
+      # TODO Fase 5: quando o acesso ao Microsoft Graph existir (Q11),
+      # adicionar aqui um step de upload pro Drive, mantendo o artifact
+      # como fallback ou removendo-o, a critério do Thiago na época.

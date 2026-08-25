@@ -190,11 +190,7 @@ def build_excel(bundle: dict, path: str):
     ws = wb.create_sheet("Integration Risks")
     ir = agents.get("integration_risks", {}).get("output", {}) or {}
     ws["A1"] = "Nível de risco"; ws["B1"] = ir.get("nivel_risco", "n/d")
-    ws["A2"] = "Itens de due diligence"; ws["A2"].font = title_font
     row = 3
-    for item in ir.get("itens_due_diligence", []):
-        ws.cell(row=row, column=1, value=f"• {item}"); row += 1
-    row += 1
     ws.cell(row=row, column=1, value="Riscos de integração").font = title_font
     row += 1
     for item in ir.get("riscos_integracao", []):

@@ -228,6 +228,95 @@ class ComplexidadeOperacionalResultado:
         }
 
 
+def avaliar_riscos_integracao(mapeado: dict) -> dict:
+    """Substitui o agente `integration_risks` (LLM) — aposentado em 25/08
+    por decisão do Thiago, depois de ler o prompt real ativo no Supabase
+    (`agent_prompts.system_prompt`, agente `integration_risks`) pra
+    confirmar o que dava pra migrar. Os 2 booleanos que o prompt pedia —
+    `opera_sistema_proprio_cliente` e `possui_outsourcing` — já são
+    avaliados no Bloco B (critérios 6 e 9 de `avaliar_complexidade_operacional`),
+    então esta função só reempacota o mesmo julgamento, sem chamar IA.
+
+    O checklist de itens de due diligence do prompt original (benefícios
+    fiscais, periodicidade de fechamento, desonerações de folha, RH/DP
+    interno vs. terceirizado, cláusula de mudança de controle) é de fato
+    ESTÁTICO — o próprio prompt não usa nenhum dado do deal pra montá-lo,
+    é sempre a mesma lista. A auditoria de 24/08 tinha ficado em dúvida
+    sobre isso sem ver o prompt; agora está confirmado. Ainda assim, por
+    decisão explícita do Thiago em 25/08, o campo foi excluído do schema
+    (não ficou como lista fixa em código) — se um dia for necessário
+    reincluir, a lista está registrada aqui embaixo, comentada, e não
+    depende de nenhum dado do deal pra ser restaurada."""
+    # itens_due_diligence originais (prompt real, sempre os mesmos, não
+    # dependem do deal) — mantidos aqui só como referência, não usados:
+    # [
+    #     "Verificar benefícios fiscais vigentes e condição de transferência",
+    #     "Confirmar periodicidade de fechamento contábil (mensal/trimestral)",
+    #     "Verificar desonerações sobre a folha de pagamento",
+    #     "Confirmar se gestão de benefícios de RH/DP é interna ou terceirizada",
+    #     "Verificar cláusulas de mudança de controle em contratos de clientes relevantes",
+    # ]
+    sistema_financeiro_e_omie = mapeado.get("sistema_financeiro_e_omie")
+    outsourcing_pessoas_pct = mapeado.get("outsourcing_pessoas_pct")
+    outsourcing_sistemas_pct = mapeado.get("outsourcing_sistemas_pct")
+
+    # Nomes exatos do prompt original — opera_sistema_proprio_cliente é o
+    # INVERSO de sistema_financeiro_e_omie (Omie/Conta Azul = não é sistema
+    # próprio do cliente). possui_outsourcing = qualquer % > 0 em pessoas
+    # ou sistemas (o prompt não definia limiar; ">0" é "existe outsourcing").
+    opera_sistema_proprio_cliente = (
+        None if sistema_financeiro_e_omie is None else not sistema_financeiro_e_omie
+    )
+    possui_outsourcing = None
+    if outsourcing_pessoas_pct is not None or outsourcing_sistemas_pct is not None:
+        possui_outsourcing = bool(
+            (outsourcing_pessoas_pct or 0) > 0 or (outsourcing_sistemas_pct or 0) > 0
+        )
+
+    riscos = []
+    if opera_sistema_proprio_cliente is True:
+        riscos.append(
+            "Cliente opera em sistema financeiro próprio além de Omie/Conta Azul — "
+            "migração de dados/processo mais complexa na integração pós-deal."
+        )
+    if outsourcing_sistemas_pct is not None and outsourcing_sistemas_pct > 15:
+        riscos.append(f"Outsourcing de sistemas do cliente = {outsourcing_sistemas_pct}% (>15%, alto).")
+    elif possui_outsourcing:
+        riscos.append(f"Outsourcing de sistemas do cliente presente ({outsourcing_sistemas_pct}%) — contrato a mapear na integração.")
+    if outsourcing_pessoas_pct is not None and outsourcing_pessoas_pct > 15:
+        riscos.append(f"Outsourcing de pessoas alocadas no cliente = {outsourcing_pessoas_pct}% (>15%, alto).")
+
+    # 3 níveis, igual ao schema original ("Baixo|Médio|Alto") — antes esta
+    # função só tinha 2 níveis, corrigido depois de ler o prompt real.
+    algum_alto = any(v is not None and v > 15 for v in (outsourcing_pessoas_pct, outsourcing_sistemas_pct))
+    algum_dado = sistema_financeiro_e_omie is not None or possui_outsourcing is not None
+    if algum_alto:
+        nivel_risco = "Alto"
+    elif opera_sistema_proprio_cliente is True or possui_outsourcing is True:
+        nivel_risco = "Médio"
+    elif algum_dado:
+        nivel_risco = "Baixo"
+    else:
+        nivel_risco = "não avaliado"
+
+    if not riscos:
+        riscos.append("Nenhum risco de integração sinalizado pelos critérios já cobertos no Bloco B.")
+
+    return {
+        "opera_sistema_proprio_cliente": opera_sistema_proprio_cliente,
+        "possui_outsourcing": possui_outsourcing,
+        "nivel_risco": nivel_risco,
+        "riscos_integracao": riscos,
+        "confidence": 0.7,
+        "evidence": [
+            {"campo": "sistema_financeiro_e_omie", "valor": str(sistema_financeiro_e_omie)},
+            {"campo": "outsourcing_sistemas_pct", "valor": str(outsourcing_sistemas_pct)},
+            {"campo": "outsourcing_pessoas_pct", "valor": str(outsourcing_pessoas_pct)},
+        ],
+        "source": "rule_engine_integration_risks_v1",
+    }
+
+
 def avaliar_riscos_operacionais(mapeado: dict) -> dict:
     """Substitui o agente `operational_risks` (LLM) — CONFIRMADO em 24/08
     lendo o prompt real dele no Supabase: todo critério numérico que ele

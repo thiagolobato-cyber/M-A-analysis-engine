@@ -49,7 +49,7 @@ from financial_engine import (
 )
 from complexity_rules import classificar_complexidade
 from formulario_mapper import detectar_e_extrair_formulario, mapear_formulario
-from regras_negocio import avaliar_viabilidade_financeira, avaliar_complexidade_operacional, avaliar_riscos_operacionais, calcular_margem_bruta
+from regras_negocio import avaliar_viabilidade_financeira, avaliar_complexidade_operacional, avaliar_riscos_operacionais, avaliar_riscos_integracao, calcular_margem_bruta
 
 MAX_ROWS_PER_SHEET = 300
 MAX_COLS_PER_SHEET = 40
@@ -440,6 +440,7 @@ def run_extraction(deal_id: str):
         output.setdefault("raw_extracted", {})["viabilidade_financeira_calculada"] = bloco_a
         output.setdefault("raw_extracted", {})["complexidade_operacional_calculada"] = bloco_b.to_agent_run_output()
         output.setdefault("raw_extracted", {})["riscos_operacionais_calculados"] = avaliar_riscos_operacionais(mapeado)
+        output.setdefault("raw_extracted", {})["riscos_integracao_calculados"] = avaliar_riscos_integracao(mapeado)
         if mapeado["avisos_mapeamento"]:
             output.setdefault("avisos", [])
             output["avisos"].extend(mapeado["avisos_mapeamento"])
@@ -683,6 +684,15 @@ def main():
         output = deal_data.get("raw_extracted", {}).get("viabilidade_financeira_calculada")
         if output is None:
             output = {"classificacao": "Dados insuficientes", "motivo": "Formulário não reconhecido nesse deal — sem Bloco A calculado."}
+    elif args.agent == "integration_risks":
+        # Aposentado em 24/08, mesmo padrão do operational_risks: os 2
+        # booleanos que este agente usava já existem no Bloco B, de graça
+        # — confirmado lendo o prompt real dele no Supabase antes de
+        # decidir. Ver avaliar_riscos_integracao() em regras_negocio.py
+        # (inclui nota sobre o checklist de due diligence não migrado).
+        output = deal_data.get("raw_extracted", {}).get("riscos_integracao_calculados")
+        if output is None:
+            output = {"nivel_risco": "não avaliado", "riscos_integracao": ["Formulário não reconhecido nesse deal."]}
     elif args.agent == "operational_risks":
         # Aposentado em 24/08: todo critério numérico que este agente
         # calculava (concentração top 10, headcount vs. carteira, sistema
