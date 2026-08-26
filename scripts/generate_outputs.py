@@ -181,52 +181,29 @@ def build_excel(bundle: dict, path: str):
         r = write_list_section(ws, r, "Próximos passos / condições", out.get("condicoes"))
     autosize(ws, [28, 60, 20, 20])
 
-    # 2. Financial Analysis — schema forense v2.0, + mini-DRE (26/08) e a
-    #    fonte/motivo da Margem Bruta (movida de Viabilidade Financeira,
-    #    que deixou de ter aba própria) ------------------------------------
+    # 2. Financial Analysis — reformulada em 26/08 (pedido do Thiago,
+    #    comparando com um exemplo que ele montou à mão): "1. EBITDA
+    #    Bridge" (bottom-up, texto) vira "1. Viabilidade Financeira"
+    #    (tabela por período, top-down, com D&A/Despesas Gerais/Lucro
+    #    Operacional/Margem EBITDA); nova seção "2. Complexidade
+    #    Operacional" (Bloco B, código); Red Flags combina o que o
+    #    agente já reporta com o de ERP (gerado em código); removidas
+    #    "Anomalias", "KPIs para Valuation" e "Limitações dos dados" —
+    #    ele achou "muita firula". -------------------------------------
     ws = wb.create_sheet("Financial Analysis")
     fin = agents.get("financial_analysis", {}).get("output", {}) or {}
     vf = agents.get("viabilidade_financeira", {}).get("output", {}) or {}
+    cb = agents.get("complexity", {}).get("output", {}) or {}
     row = 1
 
-    # 0. Mini-DRE por período (determinística, 100% código — ver
-    # dre_balancete_parser.py:montar_mini_dre) — só aparece quando a DRE
-    # foi reconhecida nesse deal.
-    mini_dre = next(iter((raw_extracted.get("mini_dre") or {}).values()), None)
-    if mini_dre and mini_dre.get("linhas"):
-        linhas_dre = mini_dre["linhas"]
-        ws.cell(row=row, column=1, value="0. DRE por Período (R$)").font = title_font
-        row += 1
-        headers = ["Linha"] + [l["periodo"] for l in linhas_dre]
-        for i, h in enumerate(headers, start=1):
-            ws.cell(row=row, column=i, value=h)
-        style_header_row(ws, row, len(headers))
-        row += 1
-        campos = [
-            ("Receita Bruta", "receita_bruta"), ("(-) Deduções", "deducoes"),
-            ("(=) Receita Líquida", "receita_liquida"), ("(-) Despesa com Pessoal", "despesa_pessoal"),
-            ("(-) Custo Sistemas", "custo_sistemas"), ("(-) Outras Despesas", "outras_despesas"),
-            ("(=) Resultado", "resultado"), ("Margem %", "margem_pct"),
-        ]
-        for label, campo in campos:
-            ws.cell(row=row, column=1, value=label).font = Font(bold=True) if "=" in label else Font()
-            for i, l in enumerate(linhas_dre, start=2):
-                v = l.get(campo)
-                ws.cell(row=row, column=i, value=f"{v}%" if campo == "margem_pct" and v is not None else v)
-            row += 1
-        ws.cell(row=row, column=1, value=f"Fonte: DRE ({mini_dre['fonte']}) — cálculo top-down, diferente do EBITDA Bridge abaixo (bottom-up).").font = Font(italic=True, size=9, color=TEXT_MUTED)
-        row += 2
-
-    # Fonte da Margem Bruta (achado real em 26/08, pedido explícito do
-    # Thiago: "deve ficar claro se foi usado o formulário ou excel e por
-    # quê" — antes só existia na aba Viabilidade Financeira, que deixou
-    # de ter aba própria; preservado aqui, não perdido no corte).
+    # Fonte da Margem Bruta (pedido do Thiago em 26/08: "deve ficar
+    # claro se foi usado o formulário ou excel e por quê").
     if vf.get("margem_bruta_fonte"):
         fonte_legivel = {
             "dre_fino": "DRE (categorização automática)", "dre_hierarquia": "DRE (extração por hierarquia)",
             "formulario": "Formulário",
         }.get(vf.get("margem_bruta_fonte"), vf.get("margem_bruta_fonte"))
-        ws.cell(row=row, column=1, value="Fonte da Margem Bruta (Bloco A)").font = Font(bold=True)
+        ws.cell(row=row, column=1, value="Fonte da Margem Bruta").font = Font(bold=True)
         ws.cell(row=row, column=2, value=fonte_legivel)
         row += 1
         if vf.get("margem_bruta_motivo"):
@@ -237,93 +214,115 @@ def build_excel(bundle: dict, path: str):
             row += 1
         row += 1
 
-    ws.cell(row=row, column=1, value="1. EBITDA Bridge").font = title_font
+    # 1. Viabilidade Financeira — tabela por período (determinística,
+    # 100% código — ver dre_balancete_parser.py:montar_tabela_viabilidade_financeira),
+    # validada célula por célula contra o exemplo do Thiago. Cai pro
+    # EBITDA Bridge do agente (bottom-up, 1 período só) só quando não há
+    # DRE reconhecível nesse deal.
+    tabela_viab = next(iter((raw_extracted.get("tabela_viabilidade_financeira") or {}).values()), None)
+    ws.cell(row=row, column=1, value="1. Viabilidade Financeira").font = title_font
     row += 1
-    bridge = fin.get("ebitda_bridge") or {}
-    bridge_rows = [
-        ("Lucro Líquido", bridge.get("lucro_liquido")), ("Resultado Financeiro", bridge.get("resultado_financeiro")),
-        ("Tributos sobre Lucro", bridge.get("tributos_sobre_lucro")), ("D&A", bridge.get("d_a")),
-        ("EBITDA Reportado", bridge.get("ebitda_reportado")), ("Margem Reportada %", bridge.get("margem_reportada_pct")),
-        ("EBITDA Ajustado", bridge.get("ebitda_ajustado")), ("Margem Ajustada %", bridge.get("margem_ajustada_pct")),
-    ]
-    for label, value in bridge_rows:
-        ws.cell(row=row, column=1, value=label).font = Font(bold=True)
-        ws.cell(row=row, column=2, value=value)
+    if tabela_viab and tabela_viab.get("linhas"):
+        linhas_v = tabela_viab["linhas"]
+        headers = ["R$"] + [l["periodo"] for l in linhas_v]
+        for i, h in enumerate(headers, start=1):
+            ws.cell(row=row, column=i, value=h)
+        style_header_row(ws, row, len(headers))
         row += 1
-    ajustes = bridge.get("ajustes") or []
-    if ajustes:
-        row += 1
-        ws.cell(row=row, column=1, value="Ajustes de não-recorrência").font = Font(bold=True)
-        row += 1
-        for aj in ajustes:
-            ws.cell(row=row, column=1, value=aj.get("descricao"))
-            ws.cell(row=row, column=2, value=aj.get("valor"))
-            ws.cell(row=row, column=3, value=aj.get("justificativa"))
+        campos_v = [
+            ("Receita Bruta", "receita_bruta", False), ("Impostos", "impostos", False),
+            ("Receita Líquida", "receita_liquida", True), ("Folha de Pagamento", "folha_pagamento", False),
+            ("Custo de Sistemas", "custo_sistemas", False), ("Margem Bruta (R$)", "margem_bruta_rs", True),
+            ("Margem Bruta (%)", "margem_bruta_pct", True), ("Despesas Gerais", "despesas_gerais", False),
+            ("(=) Lucro Operacional", "lucro_operacional", True), ("(+) D&A", "d_a", False),
+            ("Margem EBITDA (R$)", "margem_ebitda_rs", True), ("Margem EBITDA (%)", "margem_ebitda_pct", True),
+        ]
+        for label, campo, negrito in campos_v:
+            ws.cell(row=row, column=1, value=label).font = Font(bold=negrito)
+            for i, l in enumerate(linhas_v, start=2):
+                v = l.get(campo)
+                ws.cell(row=row, column=i, value=f"{v}%" if campo.endswith("_pct") and v is not None else v)
             row += 1
-
-    row += 2
-    ws.cell(row=row, column=1, value="2. Anomalias Detectadas").font = title_font
-    row += 1
-    headers = ["Conta", "Período", "Severidade", "Narrativa"]
-    for i, h in enumerate(headers, start=1):
-        ws.cell(row=row, column=i, value=h)
-    style_header_row(ws, row, len(headers))
-    row += 1
-    for a in fin.get("anomalias", []):
-        ws.cell(row=row, column=1, value=a.get("conta")); ws.cell(row=row, column=2, value=a.get("periodo"))
-        ws.cell(row=row, column=3, value=a.get("severidade")); ws.cell(row=row, column=4, value=a.get("narrativa"))
-        row += 1
-    if not fin.get("anomalias"):
-        ws.cell(row=row, column=1, value="Nenhuma anomalia detectada (ou sem série temporal suficiente para avaliar)")
-        row += 1
-
-    row += 2
-    ws.cell(row=row, column=1, value="3. Red Flags").font = title_font
-    row += 1
-    headers = ["Severidade", "Título", "Detalhe", "Valor"]
-    for i, h in enumerate(headers, start=1):
-        ws.cell(row=row, column=i, value=h)
-    style_header_row(ws, row, len(headers))
-    row += 1
-    for flag in fin.get("red_flags", []):
-        ws.cell(row=row, column=1, value=flag.get("severidade")); ws.cell(row=row, column=2, value=flag.get("titulo"))
-        ws.cell(row=row, column=3, value=flag.get("detalhe")); ws.cell(row=row, column=4, value=flag.get("valor"))
-        row += 1
-
-    row += 2
-    ws.cell(row=row, column=1, value="4. Perguntas para Due Diligence").font = title_font
-    row += 1
-    headers = ["Prioridade", "Pergunta", "Contexto"]
-    for i, h in enumerate(headers, start=1):
-        ws.cell(row=row, column=i, value=h)
-    style_header_row(ws, row, len(headers))
-    row += 1
-    for q in fin.get("perguntas_dd", []):
-        ws.cell(row=row, column=1, value=q.get("prioridade")); ws.cell(row=row, column=2, value=q.get("pergunta"))
-        ws.cell(row=row, column=3, value=q.get("contexto"))
-        row += 1
-
-    row += 2
-    kpis = fin.get("kpis_valuation") or {}
-    if kpis:
-        ws.cell(row=row, column=1, value="5. KPIs para Valuation").font = title_font
-        row += 1
-        for k, v in kpis.items():
-            ws.cell(row=row, column=1, value=k); ws.cell(row=row, column=2, value=v)
+        if not tabela_viab.get("d_a_reconhecido"):
+            ws.cell(row=row, column=1, value="D&A não identificado nesta DRE — Margem EBITDA = Margem do Lucro Operacional (aproximação razoável quando D&A é imaterial).").font = Font(italic=True, size=9, color=TEXT_MUTED)
             row += 1
-
-    limitacoes = fin.get("limitacoes_dados") or []
-    if limitacoes:
+        ws.cell(row=row, column=1, value=f"Fonte: DRE ({tabela_viab['fonte']}).").font = Font(italic=True, size=9, color=TEXT_MUTED)
         row += 2
-        ws.cell(row=row, column=1, value="Limitações dos dados disponíveis").font = title_font
+    else:
+        # Fallback: sem DRE reconhecível, usa o EBITDA Bridge do agente
+        # (bottom-up, 1 valor só — não é por período).
+        bridge = fin.get("ebitda_bridge") or {}
+        bridge_rows = [
+            ("Lucro Líquido", bridge.get("lucro_liquido")), ("Resultado Financeiro", bridge.get("resultado_financeiro")),
+            ("Tributos sobre Lucro", bridge.get("tributos_sobre_lucro")), ("D&A", bridge.get("d_a")),
+            ("EBITDA Reportado", bridge.get("ebitda_reportado")), ("Margem Reportada %", bridge.get("margem_reportada_pct")),
+        ]
+        for label, value in bridge_rows:
+            ws.cell(row=row, column=1, value=label).font = Font(bold=True)
+            ws.cell(row=row, column=2, value=value)
+            row += 1
         row += 1
-        for lim in limitacoes:
-            cell = ws.cell(row=row, column=1, value=f"• {lim}")
-            cell.alignment = wrap
-            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
+
+    # 2. Complexidade Operacional (Bloco B, código — achado real em
+    # 26/08: essa tabela morava só na aba "Complexity" que foi removida
+    # antes; o Thiago quer ela de volta, mas embutida aqui).
+    if cb.get("tabela_completa"):
+        ws.cell(row=row, column=1, value="2. Complexidade Operacional").font = title_font
+        row += 1
+        headers = ["Título", "Detalhe", "Severidade", "Pontuação"]
+        for i, h in enumerate(headers, start=1):
+            ws.cell(row=row, column=i, value=h)
+        style_header_row(ws, row, len(headers))
+        row += 1
+        for c in cb["tabela_completa"]:
+            ws.cell(row=row, column=1, value=c["criterio"]); ws.cell(row=row, column=2, value=c.get("detalhe", ""))
+            ws.cell(row=row, column=3, value=c["nivel"]); ws.cell(row=row, column=4, value=c["pontos"])
+            row += 1
+        ws.cell(row=row, column=1, value="Complexidade do Parceiro").font = Font(bold=True)
+        ws.cell(row=row, column=3, value=cb.get("classificacao", "")).font = Font(bold=True)
+        ws.cell(row=row, column=4, value=cb.get("score_total", "")).font = Font(bold=True)
+        row += 2
+
+    # 3. Red Flags — combina o que o agente financial_analysis já reporta
+    # com o red flag de ERP (gerado em código, sempre que o sistema não
+    # está na lista de conhecidos — ver regras_negocio.py:gerar_red_flag_erp).
+    red_flags = list(fin.get("red_flags", []))
+    flag_erp = raw_extracted.get("red_flag_erp_calculado")
+    if flag_erp and not any("erp" in f.get("titulo", "").lower() for f in red_flags):
+        # Insere logo depois dos outros "Alto" — mantém a ordem de
+        # severidade em vez de só anexar no fim.
+        idx_insercao = len([f for f in red_flags if f.get("severidade") == "Alto"])
+        red_flags.insert(idx_insercao, flag_erp)
+    if red_flags:
+        ws.cell(row=row, column=1, value="3. Red Flags").font = title_font
+        row += 1
+        headers = ["Severidade", "Título", "Detalhe", "Valor"]
+        for i, h in enumerate(headers, start=1):
+            ws.cell(row=row, column=i, value=h)
+        style_header_row(ws, row, len(headers))
+        row += 1
+        for flag in red_flags:
+            ws.cell(row=row, column=1, value=flag.get("severidade")); ws.cell(row=row, column=2, value=flag.get("titulo"))
+            ws.cell(row=row, column=3, value=flag.get("detalhe")); ws.cell(row=row, column=4, value=flag.get("valor"))
+            row += 1
+        row += 1
+
+    # 4. Perguntas para Due Diligence
+    if fin.get("perguntas_dd"):
+        row += 1
+        ws.cell(row=row, column=1, value="4. Perguntas para Due Diligence").font = title_font
+        row += 1
+        headers = ["Prioridade", "Pergunta", "Contexto"]
+        for i, h in enumerate(headers, start=1):
+            ws.cell(row=row, column=i, value=h)
+        style_header_row(ws, row, len(headers))
+        row += 1
+        for q in fin["perguntas_dd"]:
+            ws.cell(row=row, column=1, value=q.get("prioridade")); ws.cell(row=row, column=2, value=q.get("pergunta"))
+            ws.cell(row=row, column=3, value=q.get("contexto"))
             row += 1
 
-    autosize(ws, [26, 40, 16, 16, 12, 45])
+    autosize(ws, [26, 45, 16, 16, 12, 45])
 
     wb.save(path)
     print(f"Excel salvo: {path}")

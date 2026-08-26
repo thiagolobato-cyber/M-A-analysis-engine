@@ -37,6 +37,11 @@ CAMPOS_FORMULARIO = {
     "perfil_restrito": [r"criptomoeda", r"perfis\s*restritos", r"se\s*enquadram\s*nos\s*seguintes\s*perfis"],
     "endereco": [r"endere[çc]o\s*do\s*escrit[óo]rio"],
     "sistema_erp": [r"sistema\s*de\s*erp\s*cont[áa]bil", r"erp\s*cont[áa]bil"],
+    # Achado real em 26/08: quando "sistema_erp" vem genérico ("Outro",
+    # sem dizer qual), este campo tem o nome de verdade — sem ele, o red
+    # flag de ERP pouco difundido citava "Outro" como se fosse o nome do
+    # sistema, o que não ajuda ninguém a saber qual sistema é.
+    "sistemas_cliente_texto": [r"quais\s*sistemas\s*do\s*cliente\s*s[ãa]o\s*utilizados"],
     "sistema_financeiro": [r"sistema\s*financeiro"],
     "opera_sistema_cliente_exceto_omie": [
         r"executa\s*atividades\s*operacionais.*sistema\s*do\s*cliente",
@@ -178,6 +183,18 @@ def _pct_clientes(qtd_clientes, total_clientes) -> float | None:
     return round(float(qtd_clientes) / float(total_clientes) * 100, 2)
 
 
+def _valor_erp_final(erp_bruto: str | None, sistemas_cliente: str | None) -> str | None:
+    """Resolve o nome de verdade do sistema — quando "Sistema de ERP
+    contábil" veio genérico ("Outro", sem dizer qual), usa o campo
+    "Quais sistemas do cliente são utilizados..." como fallback. Achado
+    real em 26/08: sem isso, o red flag de ERP pouco difundido citava
+    "Outro" como se fosse o nome do sistema, o que não identifica nada
+    pro time de due diligence."""
+    if erp_bruto and erp_bruto.strip().lower() not in ("outro", "outros", ""):
+        return erp_bruto
+    return sistemas_cliente or erp_bruto
+
+
 def mapear_formulario(respostas_canonicas: dict, rbt12_real: float | None = None) -> dict:
     """`respostas_canonicas` é o dict {campo_canonico: valor} que
     `extrair_respostas_linha` já produziu. Retorna pronto pra **desempacotar**
@@ -242,7 +259,7 @@ def mapear_formulario(respostas_canonicas: dict, rbt12_real: float | None = None
         "concentracao_top10_pct": _pct_para_100(g("concentracao_top10_pct")),
         "segmentos_sensiveis_presentes": segmentos_sensiveis_presentes,
         "sistema_financeiro_e_omie": sistema_financeiro_e_omie,
-        "sistema_utilizado_texto": g("sistema_erp"),
+        "sistema_utilizado_texto": _valor_erp_final(g("sistema_erp"), g("sistemas_cliente_texto")),
         "sistema_hospedagem": _normalizar_hospedagem(g("infraestrutura")),
         "outsourcing_pessoas_pct": _pct_clientes(g("outsourcing_pessoas_clientes_qtd"), g("numero_clientes")),
         "outsourcing_sistemas_pct": _pct_clientes(g("outsourcing_sistemas_clientes_qtd"), g("numero_clientes")),

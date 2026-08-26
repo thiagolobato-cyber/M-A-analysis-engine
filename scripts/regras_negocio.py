@@ -188,6 +188,21 @@ MUNICIPIOS_GRANDE_SP = {
 }
 
 
+def erp_e_reconhecido(sistema_texto: str | None) -> str:
+    """Mesma lógica de `classificar_erp_infraestrutura`, mas retorna qual
+    categoria de reconhecimento bateu ("dominio_sci" | "nomeado_conhecido"
+    | "nao_reconhecido") — usado pra gerar o red flag de ERP com o nome
+    do sistema (achado real em 26/08, pedido do Thiago: "falar qual é o
+    ERP... é alto pois não está na nossa lista"). Não recalcula nada
+    diferente do que a matriz já decide — só expõe o motivo."""
+    texto = (sistema_texto or "").strip().lower()
+    if ("domínio" in texto or "dominio" in texto) and "sci" in texto:
+        return "dominio_sci"
+    if any(nome in texto for nome in SISTEMAS_NOMEADOS_CONHECIDOS):
+        return "nomeado_conhecido"
+    return "nao_reconhecido"
+
+
 def classificar_erp_infraestrutura(sistema_texto: str | None, hospedagem: str | None) -> str:
     """'Domínio e SCI' é reconhecido quando o campo contém simultaneamente as
     palavras 'Domínio' e 'SCI' (regra literal do documento). Campo vazio ou
@@ -206,6 +221,36 @@ def _nivel_para_pontos(nivel: str) -> int:
     return {"Baixa": 0, "Média": 1, "Media": 1, "Alta": 2}.get(nivel, 0)
 
 
+def gerar_red_flag_erp(sistema_utilizado_texto: str | None, sistema_hospedagem: str | None) -> dict | None:
+    """Red flag de ERP pouco difundido — código, não IA (achado real em
+    26/08, pedido do Thiago: "é alto pois não está na nossa lista e nós
+    identificamos se esse ERP é pouco utilizado ou não"). Usa a mesma
+    matriz ERP × Infraestrutura do Bloco B — não reavalia nada, só decide
+    se vale a pena virar um red flag explícito (só quando "Alta", ou
+    seja, sistema fora da lista de conhecidos). Retorna None quando o
+    sistema é reconhecido (Domínio+SCI ou nomeado conhecido) ou quando
+    não há sistema informado."""
+    if not sistema_utilizado_texto or not sistema_utilizado_texto.strip():
+        return None
+    if erp_e_reconhecido(sistema_utilizado_texto) != "nao_reconhecido":
+        return None
+    nome = sistema_utilizado_texto.strip()
+    # Achado real em 26/08: o campo pode vir como descrição longa (o
+    # texto do formulário, não só o nome do sistema) — trunca só pro
+    # TÍTULO (que precisa ser curto), mantém o texto completo no detalhe.
+    nome_curto = nome if len(nome) <= 40 else nome[:37] + "..."
+    return {
+        "severidade": "Alto",
+        "titulo": f"ERP pouco utilizado no mercado ({nome_curto})",
+        "detalhe": (
+            f'"{nome}" não está na lista de sistemas conhecidos do motor de complexidade '
+            "(Domínio+SCI ou os nomeados: Contmatic, Folhamatic, Questor, Fortes, Alterdata) — "
+            "ponto crítico de integração operacional, potencial dificuldade de migração/sinergia."
+        ),
+        "source": "rule_engine_complexidade_operacional_v2",
+    }
+
+
 @dataclass
 class ComplexidadeOperacionalResultado:
     score_total: int
@@ -221,6 +266,15 @@ class ComplexidadeOperacionalResultado:
             "criterios_acionados": [
                 {"criterio": d["criterio"], "detalhe": d["nivel"], "nivel_apontado": d["nivel"]}
                 for d in self.detalhe_por_criterio if d["nivel"] != "Baixa"
+            ],
+            # Tabela completa (Título/Detalhe/Severidade/Pontuação) — achado
+            # real em 26/08, pedido do Thiago: quer ver essa estrutura
+            # dentro da aba Financial Analysis do Excel. Inclui TODOS os
+            # critérios (não só os acionados), igual ao exemplo que ele
+            # mandou.
+            "tabela_completa": [
+                {"criterio": d["criterio"], "detalhe": d.get("detalhe", ""), "nivel": d["nivel"], "pontos": d["pontos"]}
+                for d in self.detalhe_por_criterio
             ],
             "evidence": [{"criterio": d["criterio"], "nivel": d["nivel"], "pontos": d["pontos"]} for d in self.detalhe_por_criterio],
             "source": "rule_engine_complexidade_operacional_v2",
@@ -403,75 +457,112 @@ def avaliar_complexidade_operacional(
     sistema_hospedagem: str | None,
     outsourcing_pessoas_pct: float | None,
     outsourcing_sistemas_pct: float | None,
+    outsourcing_pessoas_pct_faturamento: float | None = None,
+    outsourcing_sistemas_pct_faturamento: float | None = None,
 ) -> ComplexidadeOperacionalResultado:
     """Score ponderado dos 9 critérios do Bloco B — soma de (pontos × peso).
-    Pontuação máxima teórica: 35 (critério 5 só tem 2 níveis, não 3)."""
+    Pontuação máxima teórica: 35 (critério 5 só tem 2 níveis, não 3).
+
+    Achado real em 26/08 (pedido do Thiago: quer ver "Título/Detalhe/
+    Severidade/Pontuação" numa tabela, não só nível): cada critério
+    agora também carrega um `detalhe` — o valor formatado que explica o
+    nível (ex.: "90% da receita", "1 HC por CNPJ") — sem isso, a tabela
+    só mostrava "Alta"/"Média"/"Baixa" sem contexto do número real por
+    trás. `outsourcing_*_pct_faturamento` são só pra CONTEXTO no detalhe
+    — a pontuação continua vindo de `outsourcing_*_pct` (por % de
+    clientes, a métrica corrigida por pedido do Thiago em 26/08); mostrar
+    os dois números evita a confusão de qual conta foi usada."""
     detalhes = []
     nao_avaliados = []
 
-    def registrar(criterio: str, peso: int, nivel: str | None, campo_nome: str):
+    def registrar(criterio: str, peso: int, nivel: str | None, campo_nome: str, detalhe_texto: str = ""):
         if nivel is None:
             nao_avaliados.append(campo_nome)
             return 0
         pontos = _nivel_para_pontos(nivel)
-        detalhes.append({"criterio": criterio, "peso": peso, "nivel": nivel, "pontos": pontos * peso})
+        detalhes.append({"criterio": criterio, "peso": peso, "nivel": nivel, "pontos": pontos * peso, "detalhe": detalhe_texto})
         return pontos * peso
 
     score = 0
 
     # 1. Custo Sistemas / Faturamento — peso 3
     nivel_bruto = _faixa_percentual(custo_sistemas_pct_faturamento, lambda v: v <= 2.5, None, lambda v: v >= 5.0)
+    det1 = f"{custo_sistemas_pct_faturamento:.1f}% do faturamento" if custo_sistemas_pct_faturamento is not None else ""
     score += registrar("Custo Sistemas / Faturamento", 3,
-                        {"Verde": "Baixa", "Amarelo": "Média", "Vermelho": "Alta"}.get(nivel_bruto), "custo_sistemas_pct_faturamento")
+                        {"Verde": "Baixa", "Amarelo": "Média", "Vermelho": "Alta"}.get(nivel_bruto), "custo_sistemas_pct_faturamento", det1)
 
     # 2. Localização — peso 2 (só 2 níveis: Baixa ou Alta, sem Média)
     if localizacao_fora_grande_sp is None:
         nao_avaliados.append("localizacao_fora_grande_sp")
     else:
         nivel = "Alta" if localizacao_fora_grande_sp else "Baixa"
-        score += registrar("Localização Geográfica", 2, nivel, "localizacao_fora_grande_sp")
+        det2 = "Fora da grande SP" if localizacao_fora_grande_sp else "Capital SP / RM"
+        score += registrar("Localização Geográfica", 2, nivel, "localizacao_fora_grande_sp", det2)
 
     # 3. CNPJ/HC (carteira ÷ headcount) — peso 2. >=20 Baixa, 15-19 Média, <15 Alta.
     if numero_clientes is not None and numero_colaboradores:
         ratio = numero_clientes / numero_colaboradores
         nivel = "Baixa" if ratio >= 20 else ("Média" if ratio >= 15 else "Alta")
-        detalhes.append({"criterio": f"CNPJ/HC = {ratio:.1f}", "peso": 2, "nivel": nivel, "pontos": _nivel_para_pontos(nivel) * 2})
+        detalhes.append({"criterio": "CNPJ/HC", "peso": 2, "nivel": nivel, "pontos": _nivel_para_pontos(nivel) * 2,
+                          "detalhe": f"{ratio:.1f} clientes por colaborador"})
         score += _nivel_para_pontos(nivel) * 2
     else:
         nao_avaliados.append("numero_clientes/numero_colaboradores")
 
     # 4. Concentração Pareto (top 10) — peso 3
     nivel_bruto = _faixa_percentual(concentracao_top10_pct, lambda v: v <= 25, None, lambda v: v > 35)
+    det4 = f"{concentracao_top10_pct:.0f}% da receita" if concentracao_top10_pct is not None else ""
     score += registrar("Concentração Pareto (top 10 clientes)", 3,
-                        {"Verde": "Baixa", "Amarelo": "Média", "Vermelho": "Alta"}.get(nivel_bruto), "concentracao_top10_pct")
+                        {"Verde": "Baixa", "Amarelo": "Média", "Vermelho": "Alta"}.get(nivel_bruto), "concentracao_top10_pct", det4)
 
     # 5. Segmentos específicos — peso 1, só 2 níveis (Baixa/Média, nunca Alta)
     if segmentos_sensiveis_presentes is None:
         nao_avaliados.append("segmentos_sensiveis_presentes")
     else:
         nivel = "Média" if segmentos_sensiveis_presentes else "Baixa"
-        score += registrar("Segmentos Específicos", 1, nivel, "segmentos_sensiveis_presentes")
+        det5 = "Presentes" if segmentos_sensiveis_presentes else "Não presentes"
+        score += registrar("Segmentos Específicos", 1, nivel, "segmentos_sensiveis_presentes", det5)
 
     # 6. Sistema Financeiro do Cliente — peso 2, só 2 níveis (Baixa/Alta, sem Média)
     if sistema_financeiro_e_omie is None:
         nao_avaliados.append("sistema_financeiro_e_omie")
     else:
         nivel = "Baixa" if sistema_financeiro_e_omie else "Alta"
-        score += registrar("Sistema Financeiro do Cliente", 2, nivel, "sistema_financeiro_e_omie")
+        det6 = "Omie ou nenhum" if sistema_financeiro_e_omie else "Diferente de Omie"
+        score += registrar("Sistema Financeiro do Cliente", 2, nivel, "sistema_financeiro_e_omie", det6)
 
-    # 7. ERP × Infraestrutura — peso 3 (matriz dedicada)
+    # 7. ERP × Infraestrutura — peso 3 (matriz dedicada). Detalhe nomeia o
+    # ERP de verdade (achado real em 26/08: "falar qual é o ERP... é alto
+    # pois não está na nossa lista" — sem isso, a tabela só dizia "Alta"
+    # sem dizer qual sistema causou isso nem por quê).
     nivel = classificar_erp_infraestrutura(sistema_utilizado_texto, sistema_hospedagem)
-    score += registrar("ERP × Infraestrutura", 3, nivel, "sistema_utilizado_texto")
+    nome_erp_bruto = (sistema_utilizado_texto or "não informado").strip()
+    nome_erp = nome_erp_bruto if len(nome_erp_bruto) <= 40 else nome_erp_bruto[:37] + "..."
+    reconhecimento = erp_e_reconhecido(sistema_utilizado_texto)
+    det7 = {
+        "dominio_sci": f"{nome_erp} — Domínio e SCI, sistema conhecido",
+        "nomeado_conhecido": f"{nome_erp} — sistema nomeado conhecido",
+        "nao_reconhecido": f"{nome_erp} — fora da lista de sistemas conhecidos",
+    }[reconhecimento]
+    score += registrar("ERP × Infraestrutura", 3, nivel, "sistema_utilizado_texto", det7)
 
-    # 8. Outsourcing — Pessoas Alocadas — peso 1
+    # 8. Outsourcing — Pessoas Alocadas — peso 1. Pontuação usa % de
+    # CLIENTES (métrica corrigida, 26/08); % de faturamento aparece só
+    # como contexto no detalhe (pedido do Thiago: "mostrar os dois").
     nivel_bruto = _faixa_percentual(outsourcing_pessoas_pct, lambda v: v <= 10, None, lambda v: v > 15)
+    det8 = f"{outsourcing_pessoas_pct:.1f}% dos clientes" if outsourcing_pessoas_pct is not None else ""
+    if outsourcing_pessoas_pct_faturamento is not None:
+        det8 += f" / {outsourcing_pessoas_pct_faturamento:.1f}% do faturamento"
     score += registrar("Outsourcing — Pessoas Alocadas", 1,
-                        {"Verde": "Baixa", "Amarelo": "Média", "Vermelho": "Alta"}.get(nivel_bruto), "outsourcing_pessoas_pct")
+                        {"Verde": "Baixa", "Amarelo": "Média", "Vermelho": "Alta"}.get(nivel_bruto), "outsourcing_pessoas_pct", det8)
 
-    # 9. Outsourcing — Sistemas do Cliente — peso 1
+    # 9. Outsourcing — Sistemas do Cliente — peso 1 (mesma lógica do 8)
     nivel_bruto = _faixa_percentual(outsourcing_sistemas_pct, lambda v: v <= 10, None, lambda v: v > 15)
+    det9 = f"{outsourcing_sistemas_pct:.1f}% dos clientes" if outsourcing_sistemas_pct is not None else ""
+    if outsourcing_sistemas_pct_faturamento is not None:
+        det9 += f" / {outsourcing_sistemas_pct_faturamento:.1f}% do faturamento"
     score += registrar("Outsourcing — Sistemas do Cliente", 1,
-                        {"Verde": "Baixa", "Amarelo": "Média", "Vermelho": "Alta"}.get(nivel_bruto), "outsourcing_sistemas_pct")
+                        {"Verde": "Baixa", "Amarelo": "Média", "Vermelho": "Alta"}.get(nivel_bruto), "outsourcing_sistemas_pct", det9)
 
     if score <= 11:
         classificacao = "Baixa Complexidade"

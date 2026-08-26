@@ -1090,9 +1090,17 @@ def calcular_resultado_de_hierarquia(hierarquia: dict) -> dict:
 
 _RE_MB_RECEITA_BRUTA = re.compile(r"(?i)^\W*receitas?\W*$|receita.*(bruta|serv|venda|faturamento)")
 _RE_MB_RECEITA_LIQUIDA = re.compile(r"(?i)receita.*l[íi]quida")
-_RE_MB_DESPESA_PESSOAL = re.compile(r"(?i)despesa.*pessoal|folha\s*de\s*pagamento|custo.*folha")
-_RE_MB_CUSTO_SISTEMAS = re.compile(r"(?i)custo.*sistemas?(?!.*financeiro)|servi[çc]os?\s*de\s*sistema")
-_RE_MB_DEDUCAO_RECEITA = re.compile(r"(?i)dedu[çc][ãa]o.*receita|impostos?\s*s[/.]?\s*(venda|serviço|faturamento)|pis.*cofins")
+_RE_MB_DESPESA_PESSOAL = re.compile(r"(?i)despesa.*pessoal|folha\s*de\s*pagamento|custo.*folha|\bfolha\b")
+_RE_MB_CUSTO_SISTEMAS = re.compile(r"(?i)custo.*sistemas?(?!.*financeiro)|servi[çc]os?\s*de\s*sistema|\bsistemas?\b(?!.*financeiro)")
+_RE_MB_DEDUCAO_RECEITA = re.compile(r"(?i)dedu[çc][ãa]o.*receita|impostos?\s*s[/.]?\s*(venda|serviço|faturamento)|pis.*cofins|^\W*dedu[çc][õo]es?\W*$")
+_RE_MB_RESULTADO = re.compile(r"(?i)resultado\s+operacional|resultado.*l[íi]quido|lucro.*l[íi]quido")
+# Marcador de linha NÃO-operacional — usado só como DESEMPATE quando
+# múltiplas linhas batem o mesmo padrão (achado real no Plannea: "Folha
+# Operacional" E "Folha Diretoria" batem "folha", mas só a primeira é o
+# custo de pessoal que a fórmula de Margem Bruta espera — a segunda é
+# despesa administrativa/de sócio, contá-la infla o custo e distorce a
+# margem pra bem longe do que o time humano validou).
+_RE_MB_NAO_OPERACIONAL = re.compile(r"(?i)diretoria|s[óo]cio|pr[óo]-labore|administrat")
 
 
 def _achar_linha_por_padrao(fonte: dict, padrao: re.Pattern, formato: str) -> dict | None:
@@ -1107,13 +1115,26 @@ def _achar_linha_por_padrao(fonte: dict, padrao: re.Pattern, formato: str) -> di
     Sistemas" QUANTO o "SUBTOTAL CUSTO COM SISTEMAS" que já soma os
     dois), pegar a primeira cegamente subestima o valor — o subtotal é
     sempre a versão mais completa/agregada quando existe. Por isso
-    prioriza qualquer candidato com "subtotal"/"total" no rótulo; só cai
-    pro primeiro candidato "normal" se nenhum subtotal bater."""
+    prioriza qualquer candidato com "subtotal"/"total" no rótulo.
+
+    SEGUNDO DESEMPATE (achado real testando a DRE do Plannea): sem
+    subtotal, "folha" sozinho bate tanto "Folha Operacional" (o custo de
+    pessoal que a fórmula de Margem Bruta espera) quanto "Folha
+    Diretoria" (despesa administrativa/de sócio — outra categoria,
+    validado contra o gabarito do time humano: incluir Diretoria levava
+    a margem de ~24% em vez dos ~35% esperados). Quando houver
+    candidatos "não-operacionais" (diretoria/sócio/administrativo)
+    misturados com outros, prefere os que NÃO são — só usa um
+    não-operacional se for a ÚNICA opção disponível."""
     candidatos = [(rotulo, dado) for rotulo, dado in fonte.items() if padrao.search(rotulo)]
     if not candidatos:
         return None
     subtotais = [c for c in candidatos if re.search(r"(?i)subtotal|total\s*geral", c[0])]
-    rotulo, dado = (subtotais or candidatos)[0]
+    if subtotais:
+        rotulo, dado = subtotais[0]
+    else:
+        operacionais = [c for c in candidatos if not _RE_MB_NAO_OPERACIONAL.search(c[0])]
+        rotulo, dado = (operacionais or candidatos)[0]
     return dado["valores"] if formato == "hierarquia" else dado
 
 
@@ -1156,6 +1177,8 @@ def extrair_margem_bruta_de_dre(dre_estruturada: dict | None, hierarquia: dict |
 
         margens_por_periodo = {}
         custo_folha_por_periodo = {}
+        custo_sistemas_por_periodo = {}
+        receita_bruta_por_periodo = {}
         for periodo, valor_receita in receita.items():
             if not valor_receita:
                 continue
@@ -1164,11 +1187,15 @@ def extrair_margem_bruta_de_dre(dre_estruturada: dict | None, hierarquia: dict |
             vi = abs(deducao.get(periodo, 0)) if deducao else 0
             margens_por_periodo[periodo] = round(100 * (valor_receita - vd - vc - vi) / valor_receita, 2)
             custo_folha_por_periodo[periodo] = round(100 * vd / valor_receita, 2)
+            custo_sistemas_por_periodo[periodo] = round(100 * vc / valor_receita, 2)
+            receita_bruta_por_periodo[periodo] = valor_receita
 
         if margens_por_periodo:
             return {
                 "margem_bruta_pct_por_periodo": margens_por_periodo,
                 "custo_folha_pct_por_periodo": custo_folha_por_periodo,
+                "custo_sistemas_pct_por_periodo": custo_sistemas_por_periodo,
+                "receita_bruta_por_periodo": receita_bruta_por_periodo,
                 "fonte": formato,
             }
     return None
@@ -1213,7 +1240,8 @@ def montar_mini_dre(dre_estruturada: dict | None, hierarquia: dict | None, perio
         # Resultado final: prioriza a ÚLTIMA linha "(=)" da hierarquia
         # (mais próxima de Lucro Líquido); se só tiver dre_estruturada
         # (caminho fino), usa resultado_liquido/margem_liquida quando
-        # reconhecidos, senão calcula por diferença.
+        # reconhecidos, senão busca por palavra-chave, senão calcula por
+        # diferença.
         resultado = None
         if formato == "hierarquia" and raizes_classificadas:
             resultados_calc = [
@@ -1224,6 +1252,16 @@ def montar_mini_dre(dre_estruturada: dict | None, hierarquia: dict | None, perio
                 resultado = resultados_calc[-1]
         if resultado is None:
             resultado = fonte.get("resultado_liquido")
+        if resultado is None:
+            # Achado real no Plannea (26/08): a DRE tem uma linha de
+            # resultado de verdade ("RESULTADO OPERACIONAL"), mas nem
+            # "resultado_liquido" nem "despesas_operacionais_total" (as
+            # 2 categorias fixas que este código tentava antes) batiam
+            # com a nomenclatura dela — a DRE separa "CUSTO OPERACIONAL"
+            # de "DESPESAS ADMINISTRATIVAS", não usa uma categoria única
+            # "despesas_operacionais_total". Busca por palavra-chave
+            # antes de recorrer ao cálculo por diferença abaixo.
+            resultado = _achar_linha_por_padrao(fonte, _RE_MB_RESULTADO, formato)
         despesas_op_total = fonte.get("despesas_operacionais_total") if formato == "fino" else None
         if resultado is None and despesas_op_total:
             # Fallback: caminho fino reconhece "despesas_operacionais_total"
@@ -1264,4 +1302,102 @@ def montar_mini_dre(dre_estruturada: dict | None, hierarquia: dict | None, perio
 
         if linhas and any(l["resultado"] is not None for l in linhas):
             return {"linhas": linhas, "fonte": formato}
+    return None
+
+
+_RE_MB_DA = re.compile(r"(?i)deprecia[çc][ãa]o|amortiza[çc][ãa]o|^\W*d\s*&\s*a\W*$")
+
+
+def montar_tabela_viabilidade_financeira(dre_estruturada: dict | None, hierarquia: dict | None, periodos_rotulos: list | None = None) -> dict | None:
+    """Tabela "Viabilidade Financeira" por período — achado real em
+    26/08, pedido do Thiago (mandou um exemplo comparando o que o
+    sistema gerava com o que ele queria): Receita Bruta -> Impostos ->
+    Receita Liquida -> Folha -> Custo Sistemas -> Margem Bruta (R$/%) ->
+    Despesas Gerais -> (=) Lucro Operacional -> (+) D&A -> Margem EBITDA
+    (R$/%). Reaproveita a mesma busca por palavra-chave de
+    montar_mini_dre/extrair_margem_bruta_de_dre -- so estende com D&A
+    (separado, quando reconhecivel) e as 2 margens no formato exato do
+    exemplo dele.
+
+    IMPORTANTE (confirmado batendo os numeros do exemplo do Thiago,
+    celula por celula): "Margem Bruta %" usa RECEITA BRUTA como base;
+    "Margem EBITDA %" usa RECEITA LIQUIDA como base -- bases diferentes
+    de proposito, nao e inconsistencia -- segue exatamente o padrao que
+    ele validou manualmente. Retorna None nos mesmos casos que
+    montar_mini_dre (sem receita ou sem resultado reconheciveis)."""
+    fontes = []
+    if dre_estruturada:
+        fontes.append((dre_estruturada, "fino"))
+    raizes_classificadas = (hierarquia or {}).get("raizes_classificadas")
+    if raizes_classificadas:
+        fontes.append((raizes_classificadas, "hierarquia"))
+
+    for fonte, formato in fontes:
+        receita = _achar_linha_por_padrao(fonte, _RE_MB_RECEITA_BRUTA, formato)
+        if receita is None:
+            receita = _achar_linha_por_padrao(fonte, _RE_MB_RECEITA_LIQUIDA, formato)
+        if receita is None:
+            continue
+        deducao = _achar_linha_por_padrao(fonte, _RE_MB_DEDUCAO_RECEITA, formato)
+        despesa_pessoal = _achar_linha_por_padrao(fonte, _RE_MB_DESPESA_PESSOAL, formato)
+        custo_sistemas = _achar_linha_por_padrao(fonte, _RE_MB_CUSTO_SISTEMAS, formato)
+        d_a = _achar_linha_por_padrao(fonte, _RE_MB_DA, formato)
+
+        resultado = None
+        if formato == "hierarquia" and raizes_classificadas:
+            resultados_calc = [
+                dados["valores"] for rotulo, dados in raizes_classificadas.items()
+                if dados["tipo"] == "resultado_calculado"
+            ]
+            if resultados_calc:
+                resultado = resultados_calc[-1]
+        if resultado is None:
+            resultado = fonte.get("resultado_liquido")
+        if resultado is None:
+            resultado = _achar_linha_por_padrao(fonte, _RE_MB_RESULTADO, formato)
+        despesas_op_total = fonte.get("despesas_operacionais_total") if formato == "fino" else None
+        if resultado is None and despesas_op_total:
+            resultado = {
+                periodo: receita.get(periodo, 0) - abs(deducao.get(periodo, 0) if deducao else 0) - abs(v)
+                for periodo, v in despesas_op_total.items()
+            }
+        if resultado is None:
+            continue
+
+        linhas = []
+        periodos = list(receita.keys())
+        for i, periodo in enumerate(periodos):
+            rotulo_periodo = periodos_rotulos[i] if periodos_rotulos and i < len(periodos_rotulos) and periodos_rotulos[i] else periodo
+            v_receita = receita.get(periodo, 0)
+            if not v_receita:
+                continue
+            v_deducao = abs(deducao.get(periodo, 0)) if deducao else 0
+            v_pessoal = abs(despesa_pessoal.get(periodo, 0)) if despesa_pessoal else 0
+            v_sistemas = abs(custo_sistemas.get(periodo, 0)) if custo_sistemas else 0
+            v_lucro_operacional = resultado.get(periodo)
+            v_da = abs(d_a.get(periodo, 0)) if d_a else 0
+            receita_liquida = v_receita - v_deducao
+            margem_bruta_rs = receita_liquida - v_pessoal - v_sistemas
+            if v_lucro_operacional is None:
+                continue
+            despesas_gerais = margem_bruta_rs - v_lucro_operacional
+            margem_ebitda_rs = v_lucro_operacional + v_da
+            linhas.append({
+                "periodo": rotulo_periodo,
+                "receita_bruta": round(v_receita, 2),
+                "impostos": -round(v_deducao, 2),
+                "receita_liquida": round(receita_liquida, 2),
+                "folha_pagamento": -round(v_pessoal, 2) if despesa_pessoal else None,
+                "custo_sistemas": -round(v_sistemas, 2) if custo_sistemas else None,
+                "margem_bruta_rs": round(margem_bruta_rs, 2),
+                "margem_bruta_pct": round(100 * margem_bruta_rs / v_receita, 2) if v_receita else None,
+                "despesas_gerais": -round(despesas_gerais, 2),
+                "lucro_operacional": round(v_lucro_operacional, 2),
+                "d_a": round(v_da, 2) if d_a else None,
+                "margem_ebitda_rs": round(margem_ebitda_rs, 2),
+                "margem_ebitda_pct": round(100 * margem_ebitda_rs / receita_liquida, 2) if receita_liquida else None,
+            })
+
+        if linhas:
+            return {"linhas": linhas, "fonte": formato, "d_a_reconhecido": d_a is not None}
     return None

@@ -44,6 +44,7 @@ from dre_balancete_parser import (
     calcular_resultado_de_hierarquia,
     extrair_margem_bruta_de_dre,
     montar_mini_dre,
+    montar_tabela_viabilidade_financeira,
     _rotulos_legiveis_periodo,
 )
 from financial_engine import (
@@ -54,7 +55,7 @@ from financial_engine import (
 )
 from complexity_rules import classificar_complexidade
 from formulario_mapper import detectar_e_extrair_formulario, mapear_formulario
-from regras_negocio import avaliar_viabilidade_financeira, avaliar_complexidade_operacional, avaliar_riscos_operacionais, avaliar_riscos_integracao, calcular_margem_bruta
+from regras_negocio import avaliar_viabilidade_financeira, avaliar_complexidade_operacional, avaliar_riscos_operacionais, avaliar_riscos_integracao, calcular_margem_bruta, gerar_red_flag_erp
 
 MAX_ROWS_PER_SHEET = 300
 MAX_COLS_PER_SHEET = 40
@@ -291,7 +292,7 @@ def format_hierarquia_dre(hierarquia: dict, resultado_calculado: dict) -> str:
     return "\n".join(lines)
 
 
-def excel_to_text(file_bytes: bytes, filename: str) -> tuple[str, list, dict, dict | None, dict | None]:
+def excel_to_text(file_bytes: bytes, filename: str) -> tuple[str, list, dict, dict | None, dict | None, dict | None, dict | None]:
     """Converte um Excel em texto legível pro Claude — não interpreta,
     só descreve fielmente o que tem em cada aba, linha por linha.
     Testado localmente contra os 8 arquivos reais do BHub antes de ir
@@ -375,13 +376,32 @@ def excel_to_text(file_bytes: bytes, filename: str) -> tuple[str, list, dict, di
         # resultado_liquido) — o EBITDA saía TODO None mesmo "tendo
         # categorizado algo". O critério certo é perguntar diretamente:
         # essa categorização vai produzir um EBITDA de verdade?
+        #
+        # TERCEIRO BUG (achado real no Plannea, 26/08): mesmo esse
+        # critério "direto" não bastou — `calcular_ebitda_de_dre` usa só
+        # as categorias FIXAS antigas (`despesas_operacionais_total`
+        # etc.), que essa DRE não bate ("CUSTO OPERACIONAL" +
+        # "DESPESAS ADMINISTRATIVAS" separados, não uma categoria única
+        # reconhecida) — mesmo já tendo tudo que `montar_mini_dre`
+        # precisa (via busca mais solta por palavra-chave). Sem essa
+        # segunda checagem, o caminho fino era descartado por engano e o
+        # pipeline caía no fallback de hierarquia, que SOMA TODOS OS
+        # PERÍODOS numa métrica só — nessa DRE, 18 meses (jan/2025 a
+        # jun/2026) somados viraram uma "receita" de R$42,56M sem
+        # sentido nenhum, e um EBITDA implausível de R$8,89M reportado
+        # ao usuário. Agora testa os dois: categorias fixas OU
+        # mini-DRE por palavra-chave — qualquer um que funcione já
+        # confirma que o caminho fino é utilizável.
         ebitda_teste = calcular_ebitda_de_dre(dre_linhas)
+        periodos_rotulos_teste = _rotulos_legiveis_periodo(dre_deteccao["meses_para_coluna"])
+        mini_dre_teste = montar_mini_dre(dre_linhas, None, periodos_rotulos_teste)
         caminho_fino_produz_ebitda = (
             ebitda_teste.get("ebitda_bottom_up_receita_menos_despesas") is not None
             or ebitda_teste.get("ebitda_top_down_lucro_liquido") is not None
+            or bool(mini_dre_teste)
         )
         if caminho_fino_produz_ebitda:
-            periodos_rotulos_fino = _rotulos_legiveis_periodo(dre_deteccao["meses_para_coluna"])
+            periodos_rotulos_fino = periodos_rotulos_teste
             parts.append(format_dre_table(dre_linhas, periodos_rotulos_fino, dre_deteccao["granularidade"]))
         else:
             # Caminho fino (regex de nomenclatura conhecida) não achou
@@ -425,6 +445,55 @@ def excel_to_text(file_bytes: bytes, filename: str) -> tuple[str, list, dict, di
         hierarquia_para_mini_dre = dre_hierarquia_info["hierarquia"] if dre_hierarquia_info else None
         mini_dre = montar_mini_dre(dre_linhas or None, hierarquia_para_mini_dre, periodos_rotulos)
 
+    # Tabela "Viabilidade Financeira" (26/08, pedido do Thiago) — mesma
+    # ideia da mini-DRE, estendida com D&A/Despesas Gerais/Lucro
+    # Operacional/Margem EBITDA, no formato exato que ele validou.
+    tabela_viabilidade = None
+    if dre_deteccao:
+        tabela_viabilidade = montar_tabela_viabilidade_financeira(dre_linhas or None, hierarquia_para_mini_dre, periodos_rotulos)
+
+    # RBT12 validado + MRR estimado (achado real em 26/08, pedido do
+    # Thiago: "coloque MRR" — RBT12 é conceito TRIBUTÁRIO específico
+    # (Anexo III do Simples Nacional, definido por lei como receita bruta
+    # dos últimos 12 MESES) e continua necessário internamente pro
+    # cálculo de alíquota — mas reportar "RBT12" pro usuário como se
+    # fosse o KPI de porte do negócio confunde mais do que ajuda,
+    # principalmente numa empresa de receita recorrente (BPO), onde MRR
+    # é a métrica padrão do setor.
+    #
+    # BUG REAL corrigido junto (achado revisando este mesmo trecho): o
+    # cálculo antigo de `rbt12_real` somava TODOS os valores disponíveis
+    # sem checar se eram realmente 12 meses — numa DRE com granularidade
+    # "periodo_livre" (ex.: 1 ano + 1 trimestre, como no BPO Innova),
+    # isso somava ~15 meses de receita como se fossem 12, inflando o
+    # RBT12 usado no cálculo de alíquota tributária. Agora só soma como
+    # RBT12 quando a granularidade é realmente mensal.
+    kpis_periodo = None
+    if dre_deteccao:
+        granularidade = dre_deteccao["granularidade"]
+        receita_bruta_periodos = dre_linhas.get("receita_bruta") if dre_linhas else None
+        if receita_bruta_periodos is None and mini_dre and mini_dre.get("linhas"):
+            receita_bruta_periodos = {f"p{i:02d}": l["receita_bruta"] for i, l in enumerate(mini_dre["linhas"])}
+
+        rbt12_dre_valido, mrr_estimado, mrr_fonte = None, None, None
+        if receita_bruta_periodos:
+            valores = [v for v in receita_bruta_periodos.values() if isinstance(v, (int, float))]
+            if granularidade == "mensal" and len(valores) >= 11:
+                rbt12_dre_valido = sum(valores[-12:])
+                mrr_estimado, mrr_fonte = valores[-1], "dre_ultimo_mes"
+            elif granularidade == "anual" and valores:
+                mrr_estimado, mrr_fonte = valores[-1] / 12, "dre_ano_mais_recente_dividido_12"
+            # granularidade "periodo_livre" (ex.: ano + trimestre juntos):
+            # duração de cada período não é padronizada o bastante pra
+            # estimar MRR com segurança aqui — cai pro faturamento_mensal
+            # do formulário como fonte, tratado abaixo.
+        kpis_periodo = {
+            "rbt12_dre_valido": round(rbt12_dre_valido, 2) if rbt12_dre_valido else None,
+            "mrr_estimado_dre": round(mrr_estimado, 2) if mrr_estimado else None,
+            "mrr_fonte": mrr_fonte,
+            "granularidade_dre": granularidade,
+        }
+
     # Se já tiramos dado financeiro estruturado (DRE ou Balancete) deste
     # arquivo, as abas que sobram (Menu, CMV, Despesas, R.F., DFC,
     # Inventário, etc.) hoje não alimentam nada no pipeline — o
@@ -461,7 +530,7 @@ def excel_to_text(file_bytes: bytes, filename: str) -> tuple[str, list, dict, di
             parts.append(f"L{row_count+1}: " + " | ".join(values))
             row_count += 1
 
-    return "\n".join(parts), contas, dre_linhas, dre_hierarquia_info, mini_dre
+    return "\n".join(parts), contas, dre_linhas, dre_hierarquia_info, mini_dre, kpis_periodo, tabela_viabilidade
 
 
 def select_relevant_accounts(series: list, top_n: int = MAX_ACCOUNTS_FOR_FINANCIAL_AGENT) -> list:
@@ -543,6 +612,8 @@ def run_extraction(deal_id: str):
     code_computed_dre = {}     # idem, pela mesma razão
     code_computed_dre_hierarquia = {}  # idem — fallback quando a DRE não bate nomenclatura conhecida
     code_computed_mini_dre = {}  # idem — DRE simplificada por período, pro PPT/Excel
+    code_computed_tabela_viabilidade = {}  # idem — tabela "Viabilidade Financeira" estendida (D&A, Margem EBITDA), pro Excel
+    code_computed_kpis_periodo = {}  # idem — RBT12 validado + MRR estimado, por arquivo
     code_computed_formulario_raw = None  # idem — respostas canônicas do formulário, se reconhecido
     for f in files:
         try:
@@ -570,7 +641,7 @@ def run_extraction(deal_id: str):
             )
             continue
 
-        texto, contas, dre, dre_hierarquia_info, mini_dre = excel_to_text(content, filename)
+        texto, contas, dre, dre_hierarquia_info, mini_dre, kpis_periodo, tabela_viabilidade = excel_to_text(content, filename)
         combined_text.append(texto)
         for conta in contas:
             conta.setdefault("arquivo", filename)
@@ -581,6 +652,10 @@ def run_extraction(deal_id: str):
             code_computed_dre_hierarquia[filename] = dre_hierarquia_info
         if mini_dre:
             code_computed_mini_dre[filename] = mini_dre
+        if tabela_viabilidade:
+            code_computed_tabela_viabilidade[filename] = tabela_viabilidade
+        if kpis_periodo:
+            code_computed_kpis_periodo[filename] = kpis_periodo
 
     full_dump = "\n\n".join(combined_text)
     checksum = hashlib.sha256(raw_bytes_for_checksum).hexdigest()
@@ -615,30 +690,52 @@ def run_extraction(deal_id: str):
         # uma mini-DRE visível no PPT/Excel, estilo teaser de M&A) —
         # {arquivo: {"linhas": [...], "fonte": "fino"|"hierarquia"}}.
         output.setdefault("raw_extracted", {})["mini_dre"] = code_computed_mini_dre
+    if code_computed_tabela_viabilidade:
+        # Tabela "Viabilidade Financeira" completa (26/08, pedido do
+        # Thiago — validado célula por célula contra o exemplo dele) —
+        # {arquivo: {"linhas": [...], "fonte": ..., "d_a_reconhecido": bool}}.
+        output.setdefault("raw_extracted", {})["tabela_viabilidade_financeira"] = code_computed_tabela_viabilidade
 
     if code_computed_formulario_raw is not None:
         # RBT12 real, a partir da receita bruta de 12 meses já extraída da
         # DRE — muito mais confiável que aproximar por faturamento_mensal
         # × 12 (decisão do Thiago em 21/08: "pegaremos na DRE"). Só cai pra
         # aproximação se não existir DRE nesse deal.
-        # GAP CONHECIDO (25/08, não fechado nesta rodada): ainda só olha
-        # `code_computed_dre` (caminho fino) — não tenta
-        # `code_computed_dre_hierarquia` (caminho novo) como fonte
-        # alternativa de receita bruta quando só o novo existir. Deals
-        # cuja DRE caiu no fallback ficam sem RBT12 real, caindo na
-        # aproximação por faturamento_mensal × 12 mais abaixo — não é
-        # silencioso (fica registrado em `rbt12_fonte`), mas vale
-        # melhorar numa próxima rodada.
-        rbt12_real = None
-        if code_computed_dre:
-            primeira_dre = next(iter(code_computed_dre.values()))
-            linha_receita_bruta = primeira_dre.get("receita_bruta")
-            if linha_receita_bruta:
-                valores_rb = [v for v in linha_receita_bruta.values() if isinstance(v, (int, float))]
-                if valores_rb:
-                    rbt12_real = sum(valores_rb)
+        # BUG REAL CORRIGIDO EM 26/08: a versão antiga somava TODOS os
+        # valores de receita disponíveis sem checar se eram realmente 12
+        # meses — numa DRE "período livre" (ex.: 1 ano + 1 trimestre),
+        # isso somava ~15 meses como se fossem 12. Agora usa
+        # `kpis_periodo`, que só considera RBT12 válido quando a
+        # granularidade é mensal de verdade.
+        primeiro_kpis_periodo = next(iter(code_computed_kpis_periodo.values()), {}) if code_computed_kpis_periodo else {}
+        rbt12_real = primeiro_kpis_periodo.get("rbt12_dre_valido")
 
         mapeado = mapear_formulario(code_computed_formulario_raw, rbt12_real=rbt12_real)
+
+        # MRR (Receita Mensal Recorrente) — achado real em 26/08, pedido
+        # do Thiago: "coloque MRR" no lugar de RBT12 como KPI de negócio
+        # reportado ao usuário. RBT12 continua existindo (acima) só pro
+        # cálculo INTERNO de alíquota do Simples Nacional — não é o KPI
+        # certo pra descrever o porte de um negócio de receita recorrente
+        # (BPO). Prioridade de fonte: DRE mensal (mais objetivo) > DRE
+        # anual dividido por 12 (aproximação) > faturamento_mensal do
+        # formulário (menos objetivo, preenchido à mão, mas sempre
+        # disponível como último recurso).
+        mrr_estimado = primeiro_kpis_periodo.get("mrr_estimado_dre")
+        mrr_fonte = primeiro_kpis_periodo.get("mrr_fonte")
+        if mrr_estimado is None and mapeado.get("faturamento_mensal") is not None:
+            mrr_estimado = mapeado["faturamento_mensal"]
+            mrr_fonte = "formulario_faturamento_mensal"
+        mapeado["mrr_estimado"] = round(mrr_estimado, 2) if mrr_estimado is not None else None
+        mapeado["mrr_fonte"] = mrr_fonte
+        mapeado["nota_sobre_kpis_financeiros"] = (
+            "Para descrever o PORTE/RECEITA do negócio ao usuário (sumário executivo, "
+            "parecer, KPIs de valuation), use mrr_estimado (Receita Mensal Recorrente) — "
+            "é o padrão do setor pra negócios de receita recorrente (BPO/serviços). "
+            "rbt12 existe só pro cálculo INTERNO de alíquota do Simples Nacional (é um "
+            "conceito tributário, definido por lei sobre 12 meses fechados) — não é KPI "
+            "de negócio e não deve ser citado como tal na narrativa."
+        )
 
         # Bloco A e B já calculados aqui, na extração — Complexity e
         # Viabilidade Financeira (agentes separados) só vão COPIAR isto
@@ -711,16 +808,50 @@ def run_extraction(deal_id: str):
         )
         bloco_a["margem_bruta_fonte"] = margem_bruta_calculada["fonte"]
         bloco_a["margem_bruta_motivo"] = margem_bruta_calculada["motivo"]
-        custo_sistemas_pct = (
-            100 * mapeado["custo_sistemas"] / mapeado["faturamento_mensal"]
-            if mapeado["faturamento_mensal"] else None
-        )
+
+        # Achado real em 26/08 (pedido explícito do Thiago): "sempre que
+        # houver DRE, ignorar o formulário completamente" pra números
+        # FINANCEIROS (receita, margem, custo folha, custo sistemas) —
+        # não pra dado que só existe no formulário mesmo (churn,
+        # concentração, número de clientes/colaboradores, outsourcing,
+        # regime tributário — a DRE não informa nada disso). Reforça a
+        # nota já criada acima com essa regra explícita, agora que já
+        # sabemos se a DRE de fato foi usada (`margem_de_dre` truthy).
+        if margem_de_dre:
+            mapeado["nota_sobre_kpis_financeiros"] += (
+                " IMPORTANTE: a DRE deste deal tem os dados financeiros necessários e "
+                "JÁ FOI USADA como fonte (ver margem_bruta_fonte/margem_bruta_calculada) "
+                "— para receita, margem, custo de folha e custo de sistemas, ignore "
+                "completamente os valores equivalentes do formulário "
+                "(faturamento_mensal, folha_informada, custo_sistemas) mesmo que "
+                "divirjam da DRE; a DRE é a fonte de verdade neste deal. O formulário "
+                "continua sendo a única fonte pra dado que a DRE não informa (churn, "
+                "concentração, número de clientes/colaboradores, outsourcing, regime "
+                "tributário, sistemas utilizados)."
+            )
+
+        # Custo Sistemas % (Bloco B) — mesma prioridade DRE > formulário
+        # (decisão do Thiago em 26/08: "sempre que houver DRE, ignorar o
+        # formulário completamente"). Antes só a Margem Bruta seguia essa
+        # regra; o Bloco B continuava lendo direto do formulário mesmo
+        # quando a DRE já tinha o dado — reaproveita o mesmo
+        # `margem_de_dre` calculado acima (já busca Custo Sistemas por
+        # palavra-chave), sem nova chamada.
+        if margem_de_dre and margem_de_dre.get("custo_sistemas_pct_por_periodo"):
+            ultimo_periodo_b = list(margem_de_dre["margem_bruta_pct_por_periodo"])[-1]
+            custo_sistemas_pct = margem_de_dre["custo_sistemas_pct_por_periodo"][ultimo_periodo_b]
+        else:
+            custo_sistemas_pct = (
+                100 * mapeado["custo_sistemas"] / mapeado["faturamento_mensal"]
+                if mapeado["faturamento_mensal"] else None
+            )
         bloco_b = avaliar_complexidade_operacional(
             custo_sistemas_pct, mapeado["localizacao_fora_grande_sp"],
             mapeado["numero_clientes"], mapeado["numero_colaboradores"],
             mapeado["concentracao_top10_pct"], mapeado["segmentos_sensiveis_presentes"],
             mapeado["sistema_financeiro_e_omie"], mapeado["sistema_utilizado_texto"],
             mapeado["sistema_hospedagem"], mapeado["outsourcing_pessoas_pct"], mapeado["outsourcing_sistemas_pct"],
+            mapeado.get("outsourcing_pessoas_pct_faturamento"), mapeado.get("outsourcing_sistemas_pct_faturamento"),
         )
 
         output.setdefault("structured", {}).update(
@@ -731,6 +862,14 @@ def run_extraction(deal_id: str):
         output.setdefault("raw_extracted", {})["complexidade_operacional_calculada"] = bloco_b.to_agent_run_output()
         output.setdefault("raw_extracted", {})["riscos_operacionais_calculados"] = avaliar_riscos_operacionais(mapeado)
         output.setdefault("raw_extracted", {})["riscos_integracao_calculados"] = avaliar_riscos_integracao(mapeado)
+        # Red flag de ERP pouco difundido — código, não IA (26/08, pedido
+        # do Thiago: "é alto pois não está na nossa lista e nós
+        # identificamos se esse ERP é pouco utilizado ou não"). None
+        # quando o ERP é reconhecido ou não informado — nesse caso não
+        # salva nada (evita raw_extracted poluído com chave vazia à toa).
+        red_flag_erp = gerar_red_flag_erp(mapeado["sistema_utilizado_texto"], mapeado["sistema_hospedagem"])
+        if red_flag_erp:
+            output.setdefault("raw_extracted", {})["red_flag_erp_calculado"] = red_flag_erp
         if mapeado["avisos_mapeamento"]:
             output.setdefault("avisos", [])
             output["avisos"].extend(mapeado["avisos_mapeamento"])
