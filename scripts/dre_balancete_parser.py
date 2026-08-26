@@ -727,7 +727,11 @@ def _rotulos_legiveis_periodo(meses_col: dict) -> list[str]:
     rotulos = []
     for chave in meses_col:
         if chave.startswith("periodo_") and "_" in chave[8:]:
-            rotulos.append(chave.split("_", 2)[-1])  # "periodo_001_2025 (ano completo)" -> "2025 (ano completo)"
+            # A chave interna vem normalizada (minúscula) — .title() bate
+            # de volta com o texto original ("2025 (ano completo)" ->
+            # "2025 (Ano Completo)"), sem precisar guardar o texto bruto
+            # em outro lugar.
+            rotulos.append(chave.split("_", 2)[-1].title())
         elif re.fullmatch(r"\d{4}", chave):
             rotulos.append(chave)  # granularidade anual — "2021", "2022"...
         else:
@@ -1167,4 +1171,97 @@ def extrair_margem_bruta_de_dre(dre_estruturada: dict | None, hierarquia: dict |
                 "custo_folha_pct_por_periodo": custo_folha_por_periodo,
                 "fonte": formato,
             }
+    return None
+
+
+def montar_mini_dre(dre_estruturada: dict | None, hierarquia: dict | None, periodos_rotulos: list | None = None) -> dict | None:
+    """Monta uma DRE simplificada (Receita Bruta -> Deduções -> Receita
+    Líquida -> Despesas -> Resultado), por período — pra exibição direta
+    em PPT/Excel, sem depender do agente de IA reconstruir isso no seu
+    texto (achado real em 26/08: pedido do Thiago pra ter uma "mini DRE"
+    visível no slide financeiro, no estilo do teaser de M&A).
+
+    Determinística, 100% código — reaproveita a mesma busca por
+    palavra-chave já usada em `extrair_margem_bruta_de_dre` pra achar
+    Receita Bruta/Líquida, Despesa com Pessoal, Custo Sistemas e Dedução
+    de Receita; o restante das despesas (tudo que não caiu nessas 4
+    linhas) fica agrupado como "Outras Despesas Operacionais", calculado
+    por diferença a partir do resultado que a própria planilha já
+    reportou (`linhas_resultado_da_fonte`) — nunca inventa um número
+    novo, só reorganiza o que já foi extraído.
+
+    Retorna None se não achar o mínimo (receita + pelo menos 1 linha de
+    resultado calculado pela própria fonte) — quem chama cai pro EBITDA
+    Bridge clássico (bottom-up) nesse caso."""
+    fontes = []
+    if dre_estruturada:
+        fontes.append((dre_estruturada, "fino"))
+    raizes_classificadas = (hierarquia or {}).get("raizes_classificadas")
+    if raizes_classificadas:
+        fontes.append((raizes_classificadas, "hierarquia"))
+
+    for fonte, formato in fontes:
+        receita = _achar_linha_por_padrao(fonte, _RE_MB_RECEITA_BRUTA, formato)
+        if receita is None:
+            receita = _achar_linha_por_padrao(fonte, _RE_MB_RECEITA_LIQUIDA, formato)
+        if receita is None:
+            continue
+        deducao = _achar_linha_por_padrao(fonte, _RE_MB_DEDUCAO_RECEITA, formato)
+        despesa_pessoal = _achar_linha_por_padrao(fonte, _RE_MB_DESPESA_PESSOAL, formato)
+        custo_sistemas = _achar_linha_por_padrao(fonte, _RE_MB_CUSTO_SISTEMAS, formato)
+
+        # Resultado final: prioriza a ÚLTIMA linha "(=)" da hierarquia
+        # (mais próxima de Lucro Líquido); se só tiver dre_estruturada
+        # (caminho fino), usa resultado_liquido/margem_liquida quando
+        # reconhecidos, senão calcula por diferença.
+        resultado = None
+        if formato == "hierarquia" and raizes_classificadas:
+            resultados_calc = [
+                dados["valores"] for rotulo, dados in raizes_classificadas.items()
+                if dados["tipo"] == "resultado_calculado"
+            ]
+            if resultados_calc:
+                resultado = resultados_calc[-1]
+        if resultado is None:
+            resultado = fonte.get("resultado_liquido")
+        despesas_op_total = fonte.get("despesas_operacionais_total") if formato == "fino" else None
+        if resultado is None and despesas_op_total:
+            # Fallback: caminho fino reconhece "despesas_operacionais_total"
+            # (subtotal completo) mas não teve uma linha "resultado_liquido"
+            # reconhecível — calcula resultado = receita_líquida - despesas
+            # totais (mesma lógica do EBITDA bottom-up já usado em
+            # `calcular_ebitda_de_dre`, só reaproveitada aqui).
+            resultado = {
+                periodo: receita.get(periodo, 0) - abs(deducao.get(periodo, 0) if deducao else 0) - abs(v)
+                for periodo, v in despesas_op_total.items()
+            }
+
+        linhas = []
+        periodos = list(receita.keys())
+        for i, periodo in enumerate(periodos):
+            rotulo_periodo = periodos_rotulos[i] if periodos_rotulos and i < len(periodos_rotulos) and periodos_rotulos[i] else periodo
+            v_receita = receita.get(periodo, 0)
+            v_deducao = abs(deducao.get(periodo, 0)) if deducao else 0
+            v_pessoal = abs(despesa_pessoal.get(periodo, 0)) if despesa_pessoal else 0
+            v_sistemas = abs(custo_sistemas.get(periodo, 0)) if custo_sistemas else 0
+            v_resultado = resultado.get(periodo) if resultado else None
+            receita_liquida = v_receita - v_deducao
+            if v_resultado is not None:
+                v_outras = receita_liquida - v_pessoal - v_sistemas - v_resultado
+            else:
+                v_outras = None
+            linhas.append({
+                "periodo": rotulo_periodo,
+                "receita_bruta": round(v_receita, 2),
+                "deducoes": -round(v_deducao, 2),
+                "receita_liquida": round(receita_liquida, 2),
+                "despesa_pessoal": -round(v_pessoal, 2) if despesa_pessoal else None,
+                "custo_sistemas": -round(v_sistemas, 2) if custo_sistemas else None,
+                "outras_despesas": -round(v_outras, 2) if v_outras is not None else None,
+                "resultado": round(v_resultado, 2) if v_resultado is not None else None,
+                "margem_pct": round(100 * v_resultado / v_receita, 1) if v_resultado is not None and v_receita else None,
+            })
+
+        if linhas and any(l["resultado"] is not None for l in linhas):
+            return {"linhas": linhas, "fonte": formato}
     return None

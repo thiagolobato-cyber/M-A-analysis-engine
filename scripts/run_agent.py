@@ -43,6 +43,8 @@ from dre_balancete_parser import (
     extrair_hierarquia_dre,
     calcular_resultado_de_hierarquia,
     extrair_margem_bruta_de_dre,
+    montar_mini_dre,
+    _rotulos_legiveis_periodo,
 )
 from financial_engine import (
     mapear_waterfall,
@@ -137,20 +139,46 @@ def format_merged_table(accounts, max_rows=300):
     return "\n".join(lines)
 
 
-def format_dre_table(dre_linhas: dict) -> str:
+def format_dre_table(dre_linhas: dict, periodos_rotulos: list | None = None, granularidade: str = "mensal") -> str:
     """Formata a DRE já extraída em código como texto compacto pro
     contexto — como a tabela já é pequena (dezenas de linhas, não
     centenas), incluir o texto inteiro aqui é barato; o que evitamos é
-    o modelo precisar RECONSTRUIR isso a partir da aba genérica."""
+    o modelo precisar RECONSTRUIR isso a partir da aba genérica.
+
+    BUG REAL CORRIGIDO EM 26/08 (achado pelo Thiago revisando o PPT de
+    um deal real): esta função sempre rotulava as colunas como "Mês01",
+    "Mês02"... mesmo quando os PERÍODOS reais eram "2025 (Ano Completo)"
+    e "2026 (Q1 Jan-Mar)" — o agente `financial_analysis`, vendo só
+    "Mês01: R$11,4M" e "Mês02: R$5,5M" no prompt, concluiu (corretamente,
+    dado o que via) que a receita "caiu 51% entre dois meses consecutivos"
+    e reportou isso como red flag/pergunta de due diligence — um achado
+    FALSO: não são dois meses, é um ano inteiro comparado a um trimestre,
+    onde a queda "aparente" é só efeito de escala de período, não
+    variação de negócio. Corrigido: usa os rótulos reais quando
+    disponíveis, e adiciona um aviso explícito quando a granularidade
+    não é mensal, pra nunca mais o agente comparar período como se fosse
+    mês a mês sem que isso seja verdade."""
+    if periodos_rotulos and any(periodos_rotulos):
+        col_labels = [r or f"mes_{m:02d}" for m, r in enumerate(periodos_rotulos, start=1)]
+    else:
+        col_labels = [f"Mês{m:02d}" for m in range(1, 13)]
     lines = [
         "===== DRE (extraída automaticamente pelo código, por rótulo de linha) =====",
         "Já vem pronta — não precisa copiar de volta no seu output, use como contexto.",
-        "Rótulo | " + " | ".join(f"Mês{m:02d}" for m in range(1, 13)),
     ]
+    if granularidade != "mensal":
+        lines.append(
+            f"ATENÇÃO — granularidade '{granularidade}', NÃO mensal: as colunas abaixo são "
+            "períodos de duração DIFERENTE entre si (ex.: um ano completo vs um trimestre) — "
+            "NUNCA trate como meses consecutivos nem calcule 'variação de um mês pro outro'. "
+            "Se comparar períodos, normalize primeiro (ex.: anualizar o trimestre) ou compare "
+            "só em %, nunca em R$ absoluto direto."
+        )
+    lines.append("Rótulo | " + " | ".join(col_labels))
     for rotulo, valores in dre_linhas.items():
         valores_fmt = " | ".join(
             f"{valores.get(f'mes_{m:02d}', 0):.2f}" if f"mes_{m:02d}" in valores else "—"
-            for m in range(1, 13)
+            for m in range(1, len(col_labels) + 1)
         )
         lines.append(f"{rotulo} | {valores_fmt}")
     return "\n".join(lines)
@@ -263,19 +291,21 @@ def format_hierarquia_dre(hierarquia: dict, resultado_calculado: dict) -> str:
     return "\n".join(lines)
 
 
-def excel_to_text(file_bytes: bytes, filename: str) -> tuple[str, list, dict, dict | None]:
+def excel_to_text(file_bytes: bytes, filename: str) -> tuple[str, list, dict, dict | None, dict | None]:
     """Converte um Excel em texto legível pro Claude — não interpreta,
     só descreve fielmente o que tem em cada aba, linha por linha.
     Testado localmente contra os 8 arquivos reais do BHub antes de ir
     pra produção (incluindo um com 24 abas e outro com erro #REF!).
 
-    Retorna (texto, contas_balancete, dre_linhas, dre_hierarquia_info) — os
-    3 últimos já estruturados em código, prontos pra injetar em
-    raw_extracted sem depender do LLM copiar de volta uma tabela grande.
-    `dre_hierarquia_info` é None na maioria dos casos (quando `dre_linhas`
-    já veio populada pelo caminho fino) — só vem preenchido quando a
-    nomenclatura da DRE não bateu com `DRE_CATEGORIAS` e foi usado o
-    fallback por indentação/colunas (achado real em 25/08).
+    Retorna (texto, contas_balancete, dre_linhas, dre_hierarquia_info,
+    mini_dre) — os 4 últimos já estruturados em código, prontos pra
+    injetar em raw_extracted sem depender do LLM copiar de volta uma
+    tabela grande. `dre_hierarquia_info` é None na maioria dos casos
+    (quando `dre_linhas` já veio populada pelo caminho fino) — só vem
+    preenchido quando a nomenclatura da DRE não bateu com
+    `DRE_CATEGORIAS` e foi usado o fallback por indentação/colunas
+    (achado real em 25/08). `mini_dre` é None quando não há DRE
+    reconhecível nesse arquivo (cai pro EBITDA Bridge clássico).
 
     REVISADO em 20/08 contra um arquivo real (Nacional Controladoria) que
     tinha AS DUAS COISAS ao mesmo tempo: 12 abas mensais (MES 01..12) E
@@ -351,7 +381,8 @@ def excel_to_text(file_bytes: bytes, filename: str) -> tuple[str, list, dict, di
             or ebitda_teste.get("ebitda_top_down_lucro_liquido") is not None
         )
         if caminho_fino_produz_ebitda:
-            parts.append(format_dre_table(dre_linhas))
+            periodos_rotulos_fino = _rotulos_legiveis_periodo(dre_deteccao["meses_para_coluna"])
+            parts.append(format_dre_table(dre_linhas, periodos_rotulos_fino, dre_deteccao["granularidade"]))
         else:
             # Caminho fino (regex de nomenclatura conhecida) não achou
             # nada — achado real em 25/08: acontece sempre que a empresa
@@ -383,6 +414,16 @@ def excel_to_text(file_bytes: bytes, filename: str) -> tuple[str, list, dict, di
                 resultado_calc = calcular_resultado_de_hierarquia(hierarquia)
                 dre_hierarquia_info = {"hierarquia": hierarquia, "resultado": resultado_calc}
                 parts.append(format_hierarquia_dre(hierarquia, resultado_calc))
+
+    # Mini-DRE por período (achado real em 26/08, pedido do Thiago: mini
+    # DRE visível no PPT/Excel, estilo teaser de M&A) — determinística,
+    # roda nos 2 caminhos (fino e hierarquia), usando os rótulos de
+    # período reais ("2025 (Ano Completo)", não "mes_01" genérico).
+    mini_dre = None
+    if dre_deteccao:
+        periodos_rotulos = _rotulos_legiveis_periodo(dre_deteccao["meses_para_coluna"])
+        hierarquia_para_mini_dre = dre_hierarquia_info["hierarquia"] if dre_hierarquia_info else None
+        mini_dre = montar_mini_dre(dre_linhas or None, hierarquia_para_mini_dre, periodos_rotulos)
 
     # Se já tiramos dado financeiro estruturado (DRE ou Balancete) deste
     # arquivo, as abas que sobram (Menu, CMV, Despesas, R.F., DFC,
@@ -420,7 +461,7 @@ def excel_to_text(file_bytes: bytes, filename: str) -> tuple[str, list, dict, di
             parts.append(f"L{row_count+1}: " + " | ".join(values))
             row_count += 1
 
-    return "\n".join(parts), contas, dre_linhas, dre_hierarquia_info
+    return "\n".join(parts), contas, dre_linhas, dre_hierarquia_info, mini_dre
 
 
 def select_relevant_accounts(series: list, top_n: int = MAX_ACCOUNTS_FOR_FINANCIAL_AGENT) -> list:
@@ -501,6 +542,7 @@ def run_extraction(deal_id: str):
     code_computed_series = []  # preenchido diretamente pelo código, não pelo LLM
     code_computed_dre = {}     # idem, pela mesma razão
     code_computed_dre_hierarquia = {}  # idem — fallback quando a DRE não bate nomenclatura conhecida
+    code_computed_mini_dre = {}  # idem — DRE simplificada por período, pro PPT/Excel
     code_computed_formulario_raw = None  # idem — respostas canônicas do formulário, se reconhecido
     for f in files:
         try:
@@ -528,7 +570,7 @@ def run_extraction(deal_id: str):
             )
             continue
 
-        texto, contas, dre, dre_hierarquia_info = excel_to_text(content, filename)
+        texto, contas, dre, dre_hierarquia_info, mini_dre = excel_to_text(content, filename)
         combined_text.append(texto)
         for conta in contas:
             conta.setdefault("arquivo", filename)
@@ -537,6 +579,8 @@ def run_extraction(deal_id: str):
             code_computed_dre[filename] = dre
         if dre_hierarquia_info:
             code_computed_dre_hierarquia[filename] = dre_hierarquia_info
+        if mini_dre:
+            code_computed_mini_dre[filename] = mini_dre
 
     full_dump = "\n\n".join(combined_text)
     checksum = hashlib.sha256(raw_bytes_for_checksum).hexdigest()
@@ -566,6 +610,11 @@ def run_extraction(deal_id: str):
         # {arquivo: {categoria: {mes: valor}}} — quem consome (ver
         # main(), branch financial_analysis) precisa checar os dois.
         output.setdefault("raw_extracted", {})["dre_hierarquia_aproximada"] = code_computed_dre_hierarquia
+    if code_computed_mini_dre:
+        # DRE simplificada por período (26/08, pedido do Thiago pra ter
+        # uma mini-DRE visível no PPT/Excel, estilo teaser de M&A) —
+        # {arquivo: {"linhas": [...], "fonte": "fino"|"hierarquia"}}.
+        output.setdefault("raw_extracted", {})["mini_dre"] = code_computed_mini_dre
 
     if code_computed_formulario_raw is not None:
         # RBT12 real, a partir da receita bruta de 12 meses já extraída da

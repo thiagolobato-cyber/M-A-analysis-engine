@@ -86,20 +86,36 @@ def fetch_deal_bundle(deal_id: str) -> dict:
         f"synthesis_runs?deal_id=eq.{deal_id}&select=*,agent_versions(version)&order=created_at.desc&limit=1",
     )
 
+    # deal_data mais recente — necessário pra acessar `raw_extracted`
+    # direto (ex.: mini_dre, calculada 100% em código na extração, nunca
+    # passou pelo output de nenhum agente de IA — ver run_agent.py).
+    deal_data = supabase_request(
+        "GET", f"deal_data?deal_id=eq.{deal_id}&order=created_at.desc&limit=1",
+    )
+
     return {
         "deal": deals[0],
         "agents": by_agent,
         "synthesis": synthesis[0] if synthesis else None,
+        "raw_extracted": (deal_data[0].get("raw_extracted") or {}) if deal_data else {},
     }
 
 
 # ---------------------------------------------------------------------------
-# EXCEL — 8 abas
+# EXCEL — 2 abas (achado real em 26/08: pedido explícito do Thiago — só
+# "Executive Summary" e "Financial Analysis" importam, o resto (Complexity,
+# Integration Risks, Operational Risks, Strategic Opinion, CFO Synthesis,
+# Viabilidade Financeira, AI Audit Log) "não serve para nada" no Excel.
+# As 2 abas continuam self-contained (não referenciam as removidas) — a
+# única informação que se perderia com a remoção pura e simples era a
+# "Fonte da Margem Bruta" (que morava só em Viabilidade Financeira), agora
+# movida pra dentro de Financial Analysis.
 # ---------------------------------------------------------------------------
 def build_excel(bundle: dict, path: str):
     deal = bundle["deal"]
     agents = bundle["agents"]
     synth = bundle["synthesis"]
+    raw_extracted = bundle.get("raw_extracted", {})
 
     wb = Workbook()
     header_font = Font(bold=True, color=WHITE, size=11)
@@ -165,91 +181,65 @@ def build_excel(bundle: dict, path: str):
         r = write_list_section(ws, r, "Próximos passos / condições", out.get("condicoes"))
     autosize(ws, [28, 60, 20, 20])
 
-    # 2. Complexity -----------------------------------------------------
-    ws = wb.create_sheet("Complexity")
-    if "score_total" in complexity:
-        ws["A1"] = "Score total (Bloco B)"; ws["B1"] = complexity.get("score_total")
-        ws["A2"] = "Classificação"; ws["B2"] = complexity.get("classificacao")
-        header_row = 4
-    else:
-        header_row = 1
-    headers = ["Criterion", "Finding", "Impact", "Evidence"]
-    for i, h in enumerate(headers, start=1):
-        ws.cell(row=header_row, column=i, value=h)
-    style_header_row(ws, header_row, len(headers))
-    row = header_row + 1
-    for crit in complexity.get("criterios_acionados", []):
-        ws.cell(row=row, column=1, value=crit.get("criterio"))
-        ws.cell(row=row, column=2, value=crit.get("detalhe"))
-        ws.cell(row=row, column=3, value=crit.get("nivel_apontado"))
-        ws.cell(row=row, column=4, value=json.dumps(complexity.get("evidence", []), ensure_ascii=False))
-        row += 1
-    autosize(ws, [28, 60, 14, 40])
-
-    # 3. Integration Risks ------------------------------------------------
-    ws = wb.create_sheet("Integration Risks")
-    ir = agents.get("integration_risks", {}).get("output", {}) or {}
-    ws["A1"] = "Nível de risco"; ws["B1"] = ir.get("nivel_risco", "n/d")
-    row = 3
-    ws.cell(row=row, column=1, value="Riscos de integração").font = title_font
-    row += 1
-    for item in ir.get("riscos_integracao", []):
-        ws.cell(row=row, column=1, value=f"• {item}"); row += 1
-    autosize(ws, [90])
-
-    # 4. Operational Risks --------------------------------------------------
-    ws = wb.create_sheet("Operational Risks")
-    op = agents.get("operational_risks", {}).get("output", {}) or {}
-    ws["A1"] = "Concentração top 10 (%)"; ws["B1"] = op.get("concentracao_receita_top10_pct")
-    ws["A2"] = "Nível de concentração"; ws["B2"] = op.get("nivel_concentracao")
-    row = 4
-    ws.cell(row=row, column=1, value="Riscos operacionais").font = title_font
-    row += 1
-    for item in op.get("riscos_operacionais", []):
-        ws.cell(row=row, column=1, value=f"• {item}"); row += 1
-    autosize(ws, [90])
-
-    # 5. Strategic Opinion ----------------------------------------------
-    ws = wb.create_sheet("Strategic Opinion")
-    op_agent = agents.get("opinion", {}).get("output", {}) or {}
-    ws["A1"] = "Recomendação"; ws["B1"] = op_agent.get("recomendacao")
-    ws["A2"] = "Parecer do time"; ws["A2"].font = title_font
-    cell = ws.cell(row=3, column=1, value=op_agent.get("parecer_do_time", ""))
-    cell.alignment = wrap
-    ws.merge_cells("A3:D3")
-    ws.row_dimensions[3].height = 100
-    autosize(ws, [28, 40, 20, 20])
-
-    # 6. CFO Synthesis --------------------------------------------------
-    ws = wb.create_sheet("CFO Synthesis")
-    if synth:
-        out = synth.get("output", {})
-        ws["A1"] = "Recomendação final"; ws["B1"] = synth.get("recommendation")
-        ws["A2"] = "Confiança"; ws["B2"] = synth.get("confidence")
-        ws["A3"] = "Sumário executivo"; ws["A3"].font = title_font
-        cell = ws.cell(row=4, column=1, value=out.get("sumario_executivo", ""))
-        cell.alignment = wrap
-        ws.merge_cells("A4:D4")
-        ws.row_dimensions[4].height = 100
-        row = 6
-        ws.cell(row=row, column=1, value="Reconciliação entre agentes").font = title_font
-        row += 1
-        for rec_item in out.get("reconciliacao", []):
-            ws.cell(row=row, column=1, value=f"Divergência: {rec_item.get('divergencia')}")
-            row += 1
-            ws.cell(row=row, column=1, value=f"Resolução: {rec_item.get('resolucao')}")
-            row += 2
-    autosize(ws, [28, 60, 20, 20])
-
-    # 7. Financial Analysis — reescrito para o schema forense v2.0 (19/08):
-    #    DRE de verdade, anomalias mês a mês, simulação de cenário, DD ------
+    # 2. Financial Analysis — schema forense v2.0, + mini-DRE (26/08) e a
+    #    fonte/motivo da Margem Bruta (movida de Viabilidade Financeira,
+    #    que deixou de ter aba própria) ------------------------------------
     ws = wb.create_sheet("Financial Analysis")
     fin = agents.get("financial_analysis", {}).get("output", {}) or {}
+    vf = agents.get("viabilidade_financeira", {}).get("output", {}) or {}
     row = 1
 
-    bridge = fin.get("ebitda_bridge") or {}
+    # 0. Mini-DRE por período (determinística, 100% código — ver
+    # dre_balancete_parser.py:montar_mini_dre) — só aparece quando a DRE
+    # foi reconhecida nesse deal.
+    mini_dre = next(iter((raw_extracted.get("mini_dre") or {}).values()), None)
+    if mini_dre and mini_dre.get("linhas"):
+        linhas_dre = mini_dre["linhas"]
+        ws.cell(row=row, column=1, value="0. DRE por Período (R$)").font = title_font
+        row += 1
+        headers = ["Linha"] + [l["periodo"] for l in linhas_dre]
+        for i, h in enumerate(headers, start=1):
+            ws.cell(row=row, column=i, value=h)
+        style_header_row(ws, row, len(headers))
+        row += 1
+        campos = [
+            ("Receita Bruta", "receita_bruta"), ("(-) Deduções", "deducoes"),
+            ("(=) Receita Líquida", "receita_liquida"), ("(-) Despesa com Pessoal", "despesa_pessoal"),
+            ("(-) Custo Sistemas", "custo_sistemas"), ("(-) Outras Despesas", "outras_despesas"),
+            ("(=) Resultado", "resultado"), ("Margem %", "margem_pct"),
+        ]
+        for label, campo in campos:
+            ws.cell(row=row, column=1, value=label).font = Font(bold=True) if "=" in label else Font()
+            for i, l in enumerate(linhas_dre, start=2):
+                v = l.get(campo)
+                ws.cell(row=row, column=i, value=f"{v}%" if campo == "margem_pct" and v is not None else v)
+            row += 1
+        ws.cell(row=row, column=1, value=f"Fonte: DRE ({mini_dre['fonte']}) — cálculo top-down, diferente do EBITDA Bridge abaixo (bottom-up).").font = Font(italic=True, size=9, color=TEXT_MUTED)
+        row += 2
+
+    # Fonte da Margem Bruta (achado real em 26/08, pedido explícito do
+    # Thiago: "deve ficar claro se foi usado o formulário ou excel e por
+    # quê" — antes só existia na aba Viabilidade Financeira, que deixou
+    # de ter aba própria; preservado aqui, não perdido no corte).
+    if vf.get("margem_bruta_fonte"):
+        fonte_legivel = {
+            "dre_fino": "DRE (categorização automática)", "dre_hierarquia": "DRE (extração por hierarquia)",
+            "formulario": "Formulário",
+        }.get(vf.get("margem_bruta_fonte"), vf.get("margem_bruta_fonte"))
+        ws.cell(row=row, column=1, value="Fonte da Margem Bruta (Bloco A)").font = Font(bold=True)
+        ws.cell(row=row, column=2, value=fonte_legivel)
+        row += 1
+        if vf.get("margem_bruta_motivo"):
+            cell = ws.cell(row=row, column=1, value=f"Motivo: {vf['margem_bruta_motivo']}")
+            cell.alignment = wrap
+            cell.font = Font(italic=True, size=9, color=TEXT_MUTED)
+            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
+            row += 1
+        row += 1
+
     ws.cell(row=row, column=1, value="1. EBITDA Bridge").font = title_font
     row += 1
+    bridge = fin.get("ebitda_bridge") or {}
     bridge_rows = [
         ("Lucro Líquido", bridge.get("lucro_liquido")), ("Resultado Financeiro", bridge.get("resultado_financeiro")),
         ("Tributos sobre Lucro", bridge.get("tributos_sobre_lucro")), ("D&A", bridge.get("d_a")),
@@ -335,63 +325,6 @@ def build_excel(bundle: dict, path: str):
 
     autosize(ws, [26, 40, 16, 16, 12, 45])
 
-    # 9. Viabilidade Financeira (Bloco A — 100% código, ver regras_negocio.py)
-    ws = wb.create_sheet("Viabilidade Financeira")
-    vf = agents.get("viabilidade_financeira", {}).get("output", {}) or {}
-    ws["A1"] = "Classificação"; ws["A1"].font = title_font
-    ws["B1"] = vf.get("classificacao", "não avaliado")
-    # Fonte da Margem Bruta (achado real em 26/08, pedido explícito do
-    # Thiago: "deve ficar claro se foi usado o formulário ou excel e
-    # por quê" — antes essa informação existia no dado interno mas não
-    # aparecia em lugar nenhum do Excel/PPT que o usuário de fato vê).
-    ws["A2"] = "Fonte da Margem Bruta"; ws["A2"].font = title_font
-    fonte_legivel = {
-        "dre_fino": "DRE (categorização automática)", "dre_hierarquia": "DRE (extração por hierarquia)",
-        "formulario": "Formulário",
-    }.get(vf.get("margem_bruta_fonte"), vf.get("margem_bruta_fonte", "não avaliado"))
-    ws["B2"] = fonte_legivel
-    ws["A3"] = "Motivo"; ws["A3"].font = title_font
-    ws["B3"] = vf.get("margem_bruta_motivo", "")
-    row = 5
-    ws.cell(row=row, column=1, value="Critério").font = title_font
-    ws.cell(row=row, column=2, value="Faixa").font = title_font
-    row += 1
-    for criterio, faixa in (vf.get("criterios") or {}).items():
-        ws.cell(row=row, column=1, value=criterio)
-        ws.cell(row=row, column=2, value=faixa or "não avaliado")
-        row += 1
-    row += 1
-    ws.cell(row=row, column=1, value="Perfil restrito presente?")
-    ws.cell(row=row, column=2, value=vf.get("perfil_restrito_presente"))
-    row += 1
-    if vf.get("criterios_nao_avaliados"):
-        row += 1
-        ws.cell(row=row, column=1, value="Critérios não avaliados (dado ausente)").font = Font(bold=True)
-        row += 1
-        for c in vf.get("criterios_nao_avaliados", []):
-            ws.cell(row=row, column=1, value=f"• {c}"); row += 1
-    autosize(ws, [32, 24])
-
-    # 8. AI Audit Log --------------------------------------------------
-    ws = wb.create_sheet("AI Audit Log")
-    headers = ["Agent", "Version", "Timestamp", "Status"]
-    for i, h in enumerate(headers, start=1):
-        ws.cell(row=1, column=i, value=h)
-    style_header_row(ws, 1, len(headers))
-    row = 2
-    for name, run in agents.items():
-        ws.cell(row=row, column=1, value=name)
-        ws.cell(row=row, column=2, value=run["agent_versions"]["version"])
-        ws.cell(row=row, column=3, value=run.get("created_at", ""))
-        ws.cell(row=row, column=4, value=run.get("status", ""))
-        row += 1
-    if synth:
-        ws.cell(row=row, column=1, value="cfo_synthesis")
-        ws.cell(row=row, column=2, value=synth["agent_versions"]["version"])
-        ws.cell(row=row, column=3, value=synth.get("created_at", ""))
-        ws.cell(row=row, column=4, value=synth.get("status", ""))
-    autosize(ws, [22, 14, 24, 14])
-
     wb.save(path)
     print(f"Excel salvo: {path}")
 
@@ -474,14 +407,97 @@ def _blank_slide(prs, bg_hex=WHITE):
 
 
 def _page_title(slide, text):
-    _add_textbox(slide, MARGIN, Inches(0.5), Inches(11.5), Inches(0.8),
-                 text, size=30, bold=True, color=NAVY)
+    _add_textbox(slide, MARGIN, Inches(0.45), Inches(11.5), Inches(0.65),
+                 text, size=24, bold=True, color=NAVY)
+
+
+def _footer(slide, deal_name, dark_bg=False):
+    color = "6B7280" if not dark_bg else "6B7A99"
+    _add_textbox(slide, MARGIN, Inches(7.12), Inches(6), Inches(0.3),
+                 f"CONFIDENCIAL  ·  {deal_name}", size=9, color=color)
+
+
+def _estimar_altura_bullets(items, largura_pol, size_pt, space_after_pt=8):
+    """Estima a altura (em Inches/EMU) que uma lista de bullets vai
+    ocupar — usada pra calcular a posição do PRÓXIMO bloco dinamicamente,
+    em vez de um valor fixo que estoura quando o texto é mais longo que
+    o previsto (bug real achado na QA visual em 26/08: 6 "próximos
+    passos" longos empurravam o último item pra cima do rodapé)."""
+    chars_por_linha = max(10, int((largura_pol * 72) / (size_pt * 0.50)))
+    total_linhas = 0
+    for item in items:
+        texto = f"—  {item}"
+        total_linhas += max(1, -(-len(texto) // chars_por_linha))  # ceil division
+    altura_pt = total_linhas * size_pt * 1.22 + len(items) * space_after_pt
+    return Inches(altura_pt / 72)
+
+
+def _add_table(slide, left, top, width, row_h, headers, rows, header_fill=NAVY,
+                col_widths=None, size=11, header_size=11, bold_last_row=True,
+                highlight_rows=None):
+    """Tabela simples pra dados tabulares (mini-DRE) — mais legível e
+    mais compacta que bullets pra esse tipo de conteúdo, achado real em
+    26/08 (pedido do Thiago pra ter uma mini-DRE visível, no estilo de
+    teaser de M&A)."""
+    n_rows = len(rows) + 1
+    n_cols = len(headers)
+    height = row_h * n_rows
+    gshape = slide.shapes.add_table(n_rows, n_cols, left, top, width, height)
+    table = gshape.table
+    if col_widths:
+        for i, w in enumerate(col_widths):
+            table.columns[i].width = w
+    highlight_rows = highlight_rows or set()
+
+    for c, h in enumerate(headers):
+        cell = table.cell(0, c)
+        cell.text = h
+        cell.fill.solid()
+        cell.fill.fore_color.rgb = _rgb(header_fill)
+        p = cell.text_frame.paragraphs[0]
+        p.alignment = PP_ALIGN.LEFT if c == 0 else PP_ALIGN.RIGHT
+        run = p.runs[0]
+        run.font.size = Pt(header_size)
+        run.font.bold = True
+        run.font.color.rgb = _rgb(WHITE)
+        run.font.name = "Calibri"
+        cell.margin_left = Inches(0.08); cell.margin_right = Inches(0.08)
+        cell.margin_top = Inches(0.03); cell.margin_bottom = Inches(0.03)
+        cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+
+    for r, row_vals in enumerate(rows, start=1):
+        is_result_row = bold_last_row and r == n_rows - 1
+        is_highlight = (r - 1) in highlight_rows
+        for c, val in enumerate(row_vals):
+            cell = table.cell(r, c)
+            cell.text = str(val)
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = _rgb("EEF1F6" if is_highlight else WHITE)
+            p = cell.text_frame.paragraphs[0]
+            p.alignment = PP_ALIGN.LEFT if c == 0 else PP_ALIGN.RIGHT
+            run = p.runs[0]
+            run.font.size = Pt(size)
+            run.font.bold = is_result_row or is_highlight
+            run.font.color.rgb = _rgb(NAVY if (is_result_row or is_highlight) else TEXT_DARK)
+            run.font.name = "Calibri"
+            cell.margin_left = Inches(0.08); cell.margin_right = Inches(0.08)
+            cell.margin_top = Inches(0.02); cell.margin_bottom = Inches(0.02)
+            cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+    return gshape
+
+
+def _fmt_mil(v) -> str:
+    """R$ mil, formato brasileiro — compacto, como o teaser de referência."""
+    if v is None:
+        return "—"
+    return f"{v/1000:,.0f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 def build_pptx(bundle: dict, path: str):
     deal = bundle["deal"]
     agents = bundle["agents"]
     synth = bundle["synthesis"]
+    raw_extracted = bundle.get("raw_extracted", {})
     complexity = agents.get("complexity", {}).get("output", {}) or {}
     opinion = agents.get("opinion", {}).get("output", {}) or {}
     integration = agents.get("integration_risks", {}).get("output", {}) or {}
@@ -489,6 +505,7 @@ def build_pptx(bundle: dict, path: str):
     financial = agents.get("financial_analysis", {}).get("output", {}) or {}
     synth_out = (synth or {}).get("output", {})
     recommendation = (synth or {}).get("recommendation", "N/D")
+    deal_name = deal.get("name", "Deal")
 
     prs = Presentation()
     prs.slide_width = SLIDE_W
@@ -496,10 +513,10 @@ def build_pptx(bundle: dict, path: str):
 
     # ---- Slide 1: Deal Overview (fundo navy, alto contraste) -------------
     s = _blank_slide(prs, bg_hex=NAVY)
-    _add_textbox(s, MARGIN, Inches(2.3), Inches(12.1), Inches(1.2),
-                 deal["name"], size=40, bold=True, color=WHITE)
-    _add_textbox(s, MARGIN, Inches(3.5), Inches(12.1), Inches(0.6),
-                 "M&A Analysis Engine — Sumário Executivo", size=16, color="C9CDD6")
+    _add_textbox(s, MARGIN, Inches(2.3), Inches(12.1), Inches(1.0),
+                 deal_name, size=38, bold=True, color=WHITE)
+    _add_textbox(s, MARGIN, Inches(3.3), Inches(12.1), Inches(0.5),
+                 "M&A Analysis Engine — Sumário Executivo", size=15, color="C9CDD6")
 
     complexity_label = complexity.get("classificacao", "não avaliado")
     stats = [
@@ -509,82 +526,184 @@ def build_pptx(bundle: dict, path: str):
     ]
     x = MARGIN
     for label, value in stats:
-        _add_textbox(s, x, Inches(4.6), Inches(3.8), Inches(0.4), label.upper(), size=12, color="8B93A8")
-        _add_textbox(s, x, Inches(5.0), Inches(3.8), Inches(0.7), str(value), size=22, bold=True, color=WHITE)
+        _add_textbox(s, x, Inches(4.5), Inches(3.8), Inches(0.35), label.upper(), size=11, color="8B93A8")
+        _add_textbox(s, x, Inches(4.85), Inches(3.8), Inches(0.6), str(value), size=20, bold=True, color=WHITE)
         x += Inches(4.0)
+    _add_textbox(s, MARGIN, Inches(7.0), Inches(8), Inches(0.3), "ESTRITAMENTE CONFIDENCIAL", size=9, color="6B7A99")
 
-    # ---- Slide 2: Complexity Assessment ------------------------------------
+    # ---- Slide 2: Complexity & Key Risks (fundido com o antigo slide 3,
+    # 26/08 — sugestão do Thiago: Complexity sozinho tinha muito espaço
+    # vazio, Key Risks já era denso; critérios viram tabela compacta em
+    # vez de linhas espaçadas, sobra espaço pra "Integração" do lado) ---
     s = _blank_slide(prs)
-    _page_title(s, "Complexity Assessment")
-    _badge(s, MARGIN, Inches(1.4), Inches(3.2), Inches(0.55), complexity_label.upper(),
-           fill_hex=DANGER if "Alta" in complexity_label else (WARN if "Média" in complexity_label else SUCCESS))
+    _page_title(s, "Complexity & Key Risks")
+    _badge(s, MARGIN, Inches(1.15), Inches(3.0), Inches(0.42), complexity_label.upper(),
+           fill_hex=DANGER if "Alta" in complexity_label else (WARN if "Média" in complexity_label else SUCCESS), size=11)
 
     criteria = complexity.get("criterios_acionados", [])
+    integracao_top = Inches(3.0)
     if criteria:
-        top = Inches(2.3)
-        for crit in criteria[:4]:
-            _add_textbox(s, MARGIN, top, Inches(3.0), Inches(0.5), crit.get("criterio", ""), size=15, bold=True, color=NAVY)
-            _add_textbox(s, Inches(4.0), top, Inches(8.5), Inches(0.7), crit.get("detalhe", ""), size=14, color=TEXT_MUTED)
-            top += Inches(1.0)
-    else:
-        _add_textbox(s, MARGIN, Inches(2.3), Inches(11.5), Inches(1), "Nenhum critério de complexidade foi acionado.", size=14, color=TEXT_MUTED)
+        crit_rows = [[c.get("criterio", ""), c.get("detalhe", "")] for c in criteria[:5]]
+        crit_row_h = Inches(0.26)
+        _add_table(s, MARGIN, Inches(1.7), Inches(5.8), crit_row_h, ["Critério", "Nível"], crit_rows,
+                   col_widths=[Inches(4.1), Inches(1.7)], size=10, header_size=10)
+        integracao_top = Inches(1.7) + crit_row_h * (len(crit_rows) + 1) + Inches(0.3)
 
-    # ---- Slide 3: Key Risks (integração + operacional) ---------------------
-    s = _blank_slide(prs)
-    _page_title(s, "Key Risks")
-    _add_textbox(s, MARGIN, Inches(1.6), Inches(5.8), Inches(0.4), "INTEGRAÇÃO", size=14, bold=True, color=CORAL)
-    _add_bullets(s, MARGIN, Inches(2.15), Inches(5.8), Inches(4.5),
-                 (integration.get("riscos_integracao") or ["Sem riscos de integração identificados."])[:5], size=15, space_after=14)
+    _add_textbox(s, MARGIN, integracao_top, Inches(5.8), Inches(0.35), "INTEGRAÇÃO", size=12, bold=True, color=CORAL)
+    _add_bullets(s, MARGIN, integracao_top + Inches(0.4), Inches(5.8), Inches(7.0) - (integracao_top + Inches(0.4)),
+                 (integration.get("riscos_integracao") or ["Sem riscos de integração identificados."])[:4], size=11, space_after=8)
 
-    _add_textbox(s, Inches(6.9), Inches(1.6), Inches(5.8), Inches(0.4), "OPERACIONAL", size=14, bold=True, color=CORAL)
+    _add_textbox(s, Inches(6.9), Inches(1.35), Inches(5.8), Inches(0.35), "OPERACIONAL", size=12, bold=True, color=CORAL)
     op_pct = operational.get("concentracao_receita_top10_pct")
     op_items = operational.get("riscos_operacionais") or ["Sem riscos operacionais identificados."]
-    body_top = Inches(2.15)
+    body_top = Inches(1.8)
     if op_pct is not None:
         level = operational.get("nivel_concentracao", "")
-        _badge(s, Inches(6.9), Inches(1.05), Inches(3.4), Inches(0.42),
+        _badge(s, Inches(6.9), Inches(0.85), Inches(3.2), Inches(0.4),
                f"Top 10: {op_pct}% ({level})",
-               fill_hex=DANGER if level == "Crítico" else (WARN if level == "Médio" else SUCCESS), size=13)
-    _add_bullets(s, Inches(6.9), body_top, Inches(5.8), Inches(4.5), op_items[:5], size=15, space_after=14)
+               fill_hex=DANGER if level == "Crítico" else (WARN if level == "Médio" else SUCCESS), size=12)
+    _add_bullets(s, Inches(6.9), body_top, Inches(5.8), Inches(5.0), op_items[:5], size=12, space_after=10)
+    _footer(s, deal_name)
 
-    # ---- Slide 4: CFO / Strategic Assessment -------------------------------
+    # ---- Slide 3: CFO / Strategic Assessment -------------------------------
     s = _blank_slide(prs)
     _page_title(s, "CFO / Strategic Assessment")
 
     fin_result = financial.get("resultado", "n/d")
-    _badge(s, MARGIN, Inches(1.4), Inches(3.0), Inches(0.5), f"Financeiro: {fin_result}",
-           fill_hex=DANGER if fin_result == "Crítico" else (WARN if fin_result == "Atenção" else SUCCESS), size=13)
+    _badge(s, MARGIN, Inches(1.2), Inches(2.8), Inches(0.44), f"Financeiro: {fin_result}",
+           fill_hex=DANGER if fin_result == "Crítico" else (WARN if fin_result == "Atenção" else SUCCESS), size=12)
 
-    fin_lines = []
+    # Mini-DRE (26/08, pedido do Thiago) — tabela de verdade, não texto
+    # corrido. Só aparece quando a DRE foi reconhecida (`mini_dre`
+    # calculada 100% em código na extração); cai pro EBITDA Bridge
+    # clássico (bottom-up, texto) quando não há DRE nesse deal.
+    mini_dre = next(iter((raw_extracted.get("mini_dre") or {}).values()), None)
+    table_top = Inches(1.85)
+    if mini_dre and mini_dre.get("linhas"):
+        linhas_dre = mini_dre["linhas"]
+        headers = ["R$ mil"] + [l["periodo"] for l in linhas_dre]
+        campos = [
+            ("Receita Bruta", "receita_bruta"), ("(-) Deduções", "deducoes"),
+            ("(=) Receita Líquida", "receita_liquida"), ("(-) Despesa com Pessoal", "despesa_pessoal"),
+            ("(-) Custo Sistemas", "custo_sistemas"), ("(-) Outras Despesas", "outras_despesas"),
+            ("(=) Resultado", "resultado"),
+        ]
+        rows = []
+        for label, campo in campos:
+            valores = [_fmt_mil(l.get(campo)) for l in linhas_dre]
+            rows.append([label] + valores)
+        rows.append(["Margem %"] + [f"{l['margem_pct']}%" if l.get("margem_pct") is not None else "—" for l in linhas_dre])
+        col_widths = [Inches(2.3)] + [Inches((5.8 - 2.3) / len(linhas_dre))] * len(linhas_dre)
+        row_h = Inches(0.34)
+        _add_table(s, MARGIN, table_top, Inches(5.8), row_h, headers, rows,
+                   col_widths=col_widths, size=10.5, header_size=10.5, highlight_rows={2})
+        # Posição da nota de rodapé calculada a partir da altura REAL da
+        # tabela (linhas de dado + cabeçalho), não um valor fixo — bug
+        # real achado na QA visual (26/08): um valor fixo colidia com o
+        # título "EBITDA BRIDGE" logo abaixo quando a tabela tinha mais
+        # linhas que o previsto.
+        nota_top = table_top + row_h * (len(rows) + 1) + Inches(0.08)
+        _add_textbox(s, MARGIN, nota_top, Inches(5.8), Inches(0.35),
+                     f"Fonte: DRE ({mini_dre['fonte']}) — não confundir com o EBITDA Bridge ao lado (metodologia diferente).",
+                     size=9, color=TEXT_MUTED)
+        body_bottom = nota_top + Inches(0.45)
+    else:
+        body_bottom = table_top
+        fin_lines = []
+        bridge = financial.get("ebitda_bridge") or {}
+        if bridge.get("ebitda_reportado") is not None:
+            fin_lines.append(f"EBITDA: R$ {bridge['ebitda_reportado']:,.0f} ({bridge.get('margem_reportada_pct', '?')}%)".replace(",", "."))
+        if bridge.get("ajustes"):
+            fin_lines.append(f"EBITDA Ajustado: R$ {bridge.get('ebitda_ajustado', 0):,.0f} ({len(bridge['ajustes'])} ajuste(s))".replace(",", "."))
+        if fin_lines:
+            _add_bullets(s, MARGIN, Inches(1.9), Inches(5.8), Inches(2.5), fin_lines, size=12, space_after=10)
+
+    # EBITDA Bridge (bottom-up) — tabela, não mais 1 linha de texto corrida
+    # (achado real em 26/08, pedido do Thiago: "onde está a bridge?" — o
+    # texto corrido escondia a estrutura do cálculo). Fica na coluna
+    # direita, empilhado com Red Flags/Parecer — a coluna esquerda já
+    # está ocupada pela mini-DRE, colocar as duas tabelas empilhadas na
+    # mesma coluna estourava o slide.
     bridge = financial.get("ebitda_bridge") or {}
+
+    # Red flags (só os 3 mais críticos, resto fica no Excel)
+    _add_textbox(s, Inches(6.9), Inches(1.2), Inches(5.8), Inches(0.35), "RED FLAGS PRINCIPAIS", size=12, bold=True, color=CORAL)
+    flags_lines = [f"({f.get('severidade')}) {f.get('titulo')}" for f in (financial.get("red_flags") or [])[:3]]
+    bridge_top = Inches(2.9)
+    if flags_lines:
+        altura_flags = _estimar_altura_bullets(flags_lines, 5.8, 11.5, space_after_pt=8)
+        _add_bullets(s, Inches(6.9), Inches(1.65), Inches(5.8), altura_flags + Inches(0.1), flags_lines, size=11.5, space_after=8)
+        bridge_top = Inches(1.65) + altura_flags + Inches(0.3)
+
+    parecer_top = bridge_top
     if bridge.get("ebitda_reportado") is not None:
-        fin_lines.append(f"EBITDA: R$ {bridge['ebitda_reportado']:,.0f} ({bridge.get('margem_reportada_pct', '?')}%)".replace(",", "."))
-    if bridge.get("ajustes"):
-        fin_lines.append(f"EBITDA Ajustado: R$ {bridge.get('ebitda_ajustado', 0):,.0f} ({len(bridge['ajustes'])} ajuste(s) de não-recorrência)".replace(",", "."))
-    for a in (financial.get("anomalias") or [])[:2]:
-        fin_lines.append(f"Anomalia: {a.get('conta')} em {a.get('periodo')} ({a.get('narrativa', '')[:80]})")
-    for flag in (financial.get("red_flags") or [])[:2]:
-        fin_lines.append(f"Red flag ({flag.get('severidade')}): {flag.get('titulo')}")
-    if fin_lines:
-        _add_bullets(s, MARGIN, Inches(2.2), Inches(5.8), Inches(3.5), fin_lines, size=14, space_after=12)
+        _add_textbox(s, Inches(6.9), bridge_top, Inches(5.8), Inches(0.3), "EBITDA BRIDGE (BOTTOM-UP)", size=11, bold=True, color=CORAL)
+        bridge_campos = [
+            ("Lucro Líquido", bridge.get("lucro_liquido")),
+            ("(+) Resultado Financeiro", bridge.get("resultado_financeiro")),
+            ("(+) Tributos sobre Lucro", bridge.get("tributos_sobre_lucro")),
+            ("(+) D&A", bridge.get("d_a")),
+            ("(=) EBITDA Reportado", bridge.get("ebitda_reportado")),
+        ]
+        bridge_rows = [[label, _fmt_mil(v)] for label, v in bridge_campos]
+        bridge_rows.append(["Margem %", f"{bridge.get('margem_reportada_pct', '?')}%"])
+        bridge_row_h = Inches(0.26)
+        bridge_table_top = bridge_top + Inches(0.35)
+        _add_table(s, Inches(6.9), bridge_table_top, Inches(3.8), bridge_row_h,
+                   ["R$ mil", "Valor"], bridge_rows, col_widths=[Inches(2.5), Inches(1.3)],
+                   size=9.5, header_size=9.5, highlight_rows={4})
+        parecer_top = bridge_table_top + bridge_row_h * (len(bridge_rows) + 1) + Inches(0.25)
 
     parecer = opinion.get("parecer_do_time", "")
-    _add_textbox(s, Inches(6.9), Inches(1.4), Inches(5.8), Inches(0.4), "PARECER DO TIME", size=14, bold=True, color=CORAL)
-    _add_textbox(s, Inches(6.9), Inches(1.9), Inches(5.8), Inches(3.8), parecer, size=15, color=TEXT_DARK)
+    if parecer:
+        _add_textbox(s, Inches(6.9), parecer_top, Inches(5.8), Inches(0.3), "PARECER DO TIME", size=12, bold=True, color=CORAL)
+        _add_textbox(s, Inches(6.9), parecer_top + Inches(0.35), Inches(5.8), Inches(7.0) - (parecer_top + Inches(0.35)), parecer, size=10.5, color=TEXT_DARK)
+    _footer(s, deal_name)
 
-    # ---- Slide 5: Recommendation & Next Steps ------------------------------
+    # ---- Slide 4: Recommendation & Next Steps ------------------------------
     s = _blank_slide(prs)
     _page_title(s, "Recommendation & Next Steps")
-    _badge(s, MARGIN, Inches(1.5), Inches(4.2), Inches(0.7), recommendation,
-           fill_hex=RECOMMENDATION_COLOR.get(recommendation, TEXT_MUTED), size=20)
+    _badge(s, MARGIN, Inches(1.15), Inches(3.6), Inches(0.6), recommendation,
+           fill_hex=RECOMMENDATION_COLOR.get(recommendation, TEXT_MUTED), size=17)
 
-    if synth_out.get("sumario_executivo"):
-        _add_textbox(s, MARGIN, Inches(2.6), Inches(11.8), Inches(1.6),
-                     synth_out["sumario_executivo"], size=16, color=TEXT_DARK)
+    # ATENÇÃO (bug real corrigido em 26/08): `sumario_executivo` pode
+    # passar de 200 palavras (um parágrafo corrido) — numa caixa de
+    # altura fixa isso sempre estourava, sobrepondo "PRÓXIMOS PASSOS"
+    # logo abaixo (slide "completamente quebrado", reportado pelo
+    # Thiago). Correção estrutural, não só cosmética: usa
+    # `principais_riscos` (lista de bullets curtos que o cfo_synthesis
+    # já produz separadamente) em vez do parágrafo corrido — bullets têm
+    # altura previsível, o parágrafo longo nunca teve. O texto completo
+    # continua disponível no Excel (aba Executive Summary).
+    riscos_curtos = synth_out.get("principais_riscos") or []
+    top = Inches(2.05)
+    LARGURA_BULLETS = 11.8  # polegadas, bate com Inches(11.8) usado abaixo
+    LIMITE_INFERIOR = Inches(6.95)  # topo do rodapé — nada pode passar disso
 
-    next_steps = synth_out.get("condicoes") or ["Nenhuma condição adicional."]
-    _add_textbox(s, MARGIN, Inches(4.5), Inches(11.8), Inches(0.4), "PRÓXIMOS PASSOS", size=14, bold=True, color=CORAL)
-    _add_bullets(s, MARGIN, Inches(5.0), Inches(11.8), Inches(2), next_steps, size=16, space_after=12)
+    riscos_curtos = riscos_curtos[:4]
+    if riscos_curtos:
+        altura_riscos = _estimar_altura_bullets(riscos_curtos, LARGURA_BULLETS, 12.5, space_after_pt=8)
+        _add_textbox(s, MARGIN, top, Inches(11.8), Inches(0.3), "PRINCIPAIS RISCOS", size=12, bold=True, color=CORAL)
+        _add_bullets(s, MARGIN, top + Inches(0.4), Inches(11.8), altura_riscos + Inches(0.1), riscos_curtos, size=12.5, space_after=8)
+        next_steps_top = top + Inches(0.4) + altura_riscos + Inches(0.35)
+    else:
+        next_steps_top = Inches(2.4)
+
+    next_steps = (synth_out.get("condicoes") or ["Nenhuma condição adicional."])[:5]
+    # Salvaguarda (bug real achado na QA visual em 26/08): mesmo com
+    # posição dinâmica, uma lista longa pode ainda não caber até o
+    # rodapé — reduz itens (nunca deixa texto vazar) até caber, ou até
+    # sobrar só 3 (mínimo útil; o resto sempre está completo no Excel).
+    while len(next_steps) > 3:
+        altura_estim = _estimar_altura_bullets(next_steps, LARGURA_BULLETS, 12.5, space_after_pt=8)
+        if next_steps_top + Inches(0.4) + altura_estim <= LIMITE_INFERIOR:
+            break
+        next_steps = next_steps[:-1]
+    altura_next_steps = _estimar_altura_bullets(next_steps, LARGURA_BULLETS, 12.5, space_after_pt=8)
+
+    _add_textbox(s, MARGIN, next_steps_top, Inches(11.8), Inches(0.3), "PRÓXIMOS PASSOS", size=12, bold=True, color=CORAL)
+    _add_bullets(s, MARGIN, next_steps_top + Inches(0.4), Inches(11.8), altura_next_steps + Inches(0.1), next_steps, size=12.5, space_after=8)
+    _footer(s, deal_name)
 
     prs.save(path)
     print(f"PPT salvo: {path}")
