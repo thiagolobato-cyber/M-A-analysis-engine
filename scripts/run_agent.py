@@ -215,15 +215,39 @@ def format_hierarquia_dre(hierarquia: dict, resultado_calculado: dict) -> str:
     como texto compacto — usado quando a DRE não bate com `DRE_CATEGORIAS`
     (nomenclatura fora do padrão) e o caminho fino (`parse_dre_sheet`) não
     categorizou nada."""
+    periodos_rotulos = hierarquia.get("periodos_rotulos") or []
+
+    def _nomes_periodo(valores: dict) -> str:
+        # "mes_01: 123" -> "2025 (ano completo): 123", quando a planilha
+        # usa período nomeado livremente ou anual (ver periodos_rotulos);
+        # pra série mensal de verdade, mantém "mes_01" (já é claro).
+        partes = []
+        for chave, v in valores.items():
+            idx = int(chave.split("_")[1]) - 1
+            nome = periodos_rotulos[idx] if idx < len(periodos_rotulos) and periodos_rotulos[idx] else chave
+            partes.append(f"{nome}={v:,.2f}")
+        return " | ".join(partes)
+
     lines = [
         "===== DRE (hierarquia extraída automaticamente por indentação/colunas, sem depender de nomenclatura fixa) =====",
         f"Modo de extração: {hierarquia['modo']} | Confiança: {'alta' if resultado_calculado.get('hierarquia_confiavel', True) else 'BAIXA — ver nota abaixo'}",
-        f"Receita total (fonte: {resultado_calculado.get('receita_total_fonte', 'n/d')}): {resultado_calculado.get('receita_total')}",
-        f"Despesa total: {resultado_calculado.get('despesa_total')}",
-        f"Resultado operacional total (aproximado): {resultado_calculado.get('resultado_operacional_total')}",
-        f"EBITDA aproximado: {resultado_calculado.get('ebitda_aproximado')}",
-        f"Margem operacional aproximada: {resultado_calculado.get('margem_operacional_pct')}%",
+        "",
+        "--- Linhas de RESULTADO já calculadas PELA PRÓPRIA planilha (mais confiáveis que qualquer soma nossa — "
+        "use estas pra Margem Bruta/EBITDA/Líquida, calculando o % sobre a receita do MESMO período) ---",
     ]
+    if resultado_calculado.get("linhas_resultado_da_fonte"):
+        for item in resultado_calculado["linhas_resultado_da_fonte"]:
+            lines.append(f"  {item['rotulo']}: {_nomes_periodo(item['valores'])}")
+    else:
+        lines.append("  (nenhuma linha de resultado pronta encontrada nesta planilha)")
+    lines.append("")
+    lines.append(
+        "--- Aproximação AMPLA nossa (soma de tudo que classificamos como despesa, do custo direto "
+        "até tributos — NÃO é Margem Bruta nem EBITDA específicos, só uma referência de sanidade) ---"
+    )
+    lines.append(f"Receita total (fonte: {resultado_calculado.get('receita_total_fonte', 'n/d')}): {resultado_calculado.get('receita_total')}")
+    lines.append(f"Despesa total (todos os níveis somados): {resultado_calculado.get('despesa_total')}")
+    lines.append(f"Margem ampla aproximada: {resultado_calculado.get('margem_operacional_pct')}%")
     if not resultado_calculado.get("hierarquia_confiavel", True):
         lines.append(
             "ATENÇÃO — confiança BAIXA: não foi detectada indentação real nessa planilha "
@@ -232,10 +256,9 @@ def format_hierarquia_dre(hierarquia: dict, resultado_calculado: dict) -> str:
             "total. Trate os números acima como estimativa grosseira, não como EBITDA final."
         )
     lines.append("")
-    lines.append("Linhas classificadas por categoria (raiz | tipo | soma no período):")
+    lines.append("Todas as linhas classificadas por categoria (raiz | tipo | valor por período):")
     for rotulo, dados in hierarquia["raizes_classificadas"].items():
-        soma = sum(dados["valores"].values())
-        lines.append(f"  {rotulo} | {dados['tipo']} | {soma:,.2f}")
+        lines.append(f"  {rotulo} | {dados['tipo']} | {_nomes_periodo(dados['valores'])}")
     return "\n".join(lines)
 
 

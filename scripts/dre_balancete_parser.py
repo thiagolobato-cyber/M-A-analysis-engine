@@ -169,16 +169,66 @@ def _parse_marcador_ano(v) -> int | None:
     return None
 
 
+_RE_COLUNA_CALCULADA = re.compile(r"(?i)%|\bvar\b|varia[çc][ãa]o")
+
+
+def _find_free_period_header_row(ws, max_scan_rows: int = 10, min_periodos: int = 2, max_scan_dados: int = 30):
+    """Terceiro fallback de cabeçalho (depois de mensal e anual) — achado
+    real em 25/08, arquivo real de deal (BPO Innova): a DRE compara dois
+    PERÍODOS NOMEADOS LIVREMENTE ("2025 (Ano Completo)", "2026 (Q1
+    Jan-Mar)"), não mês nem ano numérico puro — nenhum dos dois
+    fallbacks anteriores reconhece isso. Aceita qualquer linha com pelo
+    menos `min_periodos` células de texto que NÃO pareçam ser uma coluna
+    CALCULADA (variação %, "Var" no nome) — essa exclusão importa: a
+    mesma planilha real tinha uma 3ª coluna "% Var (2026 anualizado)"
+    que, se tratada como período de dado bruto, misturaria percentual
+    com valor monetário na soma (número sem sentido nenhum).
+
+    IMPORTANTE (bug real corrigido em 25/08): também exige que a coluna
+    tenha valores NUMÉRICOS reais nas linhas de dados logo abaixo — sem
+    essa checagem, a própria coluna de RÓTULO ("CONTA / SUBCONTA", texto
+    em toda linha) passava como se fosse mais um "período", porque
+    também tem texto não-vazio no cabeçalho."""
+    linhas_cache = list(ws.iter_rows(min_row=1, max_row=max_scan_rows + max_scan_dados, values_only=True))
+    for idx, row in enumerate(linhas_cache[:max_scan_rows]):
+        r = idx + 1
+        row_vals = [_norm(v) for v in row]
+        candidatos_texto = {}
+        for i, v in enumerate(row_vals):
+            if not v or _RE_COLUNA_CALCULADA.search(v):
+                continue
+            candidatos_texto[i] = f"periodo_{i:03d}_{v[:24]}"
+        if len(candidatos_texto) < min_periodos:
+            continue
+        # Confirma que cada coluna candidata tem valor numérico de
+        # verdade abaixo — só assim é período de dado, não rótulo.
+        linhas_dados = linhas_cache[idx + 1: idx + 1 + max_scan_dados]
+        candidatos = {}
+        for i, chave in candidatos_texto.items():
+            tem_numero = any(
+                isinstance(dr[i], (int, float)) for dr in linhas_dados if i < len(dr)
+            )
+            if tem_numero:
+                candidatos[chave] = i
+        if len(candidatos) >= min_periodos:
+            row_vals_limpo = ["" if i in candidatos.values() else rv for i, rv in enumerate(row_vals)]
+            return r, row_vals_limpo, candidatos
+    return None
+
+
 def _find_period_header_row(ws, max_scan_rows: int = 10, min_months: int = 6, min_anos: int = 3):
     """Acha cabeçalho de período pra DRE — tenta MENSAL primeiro (mais
     granular, preferível sempre que existir); se não achar, cai pra
     ANUAL (achado real em 25/08: 3 dos 11 arquivos reais testados eram
     DRE anual, não mensal — sem esse fallback, ficavam 100% não
-    reconhecidos). Retorna (linha, row_vals_limpo, periodos_col,
-    granularidade) — granularidade é sempre marcada explicitamente no
-    retorno, pra quem consumir NUNCA tratar coluna anual como se fosse
-    um mês (isso produziria número financeiro errado silenciosamente,
-    ex.: RBT12 ou waterfall mensal aplicado em cima de total anual)."""
+    reconhecidos); se ainda assim não achar, cai pra PERÍODO LIVRE (ver
+    `_find_free_period_header_row` — achado real com um deal de verdade,
+    BPO Innova, cujo cabeçalho não é mês nem ano). Retorna (linha,
+    row_vals_limpo, periodos_col, granularidade) — granularidade é
+    sempre marcada explicitamente no retorno, pra quem consumir NUNCA
+    tratar coluna anual/livre como se fosse um mês (isso produziria
+    número financeiro errado silenciosamente, ex.: RBT12 ou waterfall
+    mensal aplicado em cima de total anual)."""
     encontrado = _find_month_header_row(ws, max_scan_rows, min_months)
     if encontrado:
         r, row_vals, periodos = encontrado
@@ -198,6 +248,11 @@ def _find_period_header_row(ws, max_scan_rows: int = 10, min_months: int = 6, mi
         if len(marcadores) >= min_anos:
             row_vals_limpo = ["" if i in indices_ano else rv for i, rv in enumerate(row_vals)]
             return r, row_vals_limpo, marcadores, "anual"
+
+    encontrado_livre = _find_free_period_header_row(ws)
+    if encontrado_livre:
+        r, row_vals, periodos = encontrado_livre
+        return r, row_vals, periodos, "periodo_livre"
     return None
 
 
@@ -556,6 +611,7 @@ def _nivel_indentacao(texto_bruto: str) -> int:
     return len(texto_bruto) - len(sem_indent)
 
 
+_RE_SINAL_AJUSTE = re.compile(r"^\(?\+/-\)?\s*")  # "(+/-)" — ajuste que pode ir nos dois sentidos, checar ANTES do sinal simples
 _RE_SINAL = re.compile(r"^\(?([+\-=])\)?\s*")
 _PALAVRAS_RECEITA = re.compile(r"(?i)receita|faturamento|entrada")
 _PALAVRAS_DESPESA = re.compile(r"(?i)despesa|custo|imposto|tribut[oaá]")
@@ -572,11 +628,21 @@ def _classificar_por_sinal_mecanico(rotulo: str) -> str | None:
       olhar o nome; fica marcado como "resultado_calculado" de propósito,
       sem fingir mais certeza do que se tem). Achado real em 25/08
       (arquivos reais 06 e 08 usam esses 3 sinais explicitamente).
+    - "(+/-)" = ajuste que pode ir nos dois sentidos (ex.: Resultado
+      Financeiro, Resultado Não Operacional) — categoria PRÓPRIA
+      ("ajuste"), nunca somada como receita nem despesa. Bug real
+      corrigido em 25/08 (DRE real BPO Innova): sem checar "(+/-)" ANTES
+      do sinal simples, o regex de "+" batia primeiro e classificava
+      como receita — um "Resultado Financeiro" negativo então SUBTRAÍA
+      da receita total, inflando artificialmente a margem calculada.
     - Presença de "receita"/"faturamento"/"entrada" = receita.
     - Presença de "resultado"/"lucro"/"prejuízo" = linha de resultado final.
     Retorna None se nenhum sinal bater — aí sim precisa de julgamento
     (IA mínima ou confirmação manual), não antes."""
-    m = _RE_SINAL.match(rotulo.strip())
+    rotulo_strip = rotulo.strip()
+    if _RE_SINAL_AJUSTE.match(rotulo_strip):
+        return "ajuste"
+    m = _RE_SINAL.match(rotulo_strip)
     if m:
         sinal = m.group(1)
         if sinal == "-":
@@ -649,6 +715,26 @@ def _detectar_colunas_hierarquia(ws, header_row: int, meses_col: dict, col_rotul
     return colunas if colunas else [col_rotulo_base]
 
 
+def _rotulos_legiveis_periodo(meses_col: dict) -> list[str]:
+    """Extrai nomes de período LEGÍVEIS a partir das chaves internas de
+    `meses_col`, na mesma ordem usada pra numerar mes_01/mes_02/... —
+    sem isso, quem consome só via "mes_01"/"mes_02" genérico, mesmo
+    quando o período real é "2025 (Ano Completo)"/"2026 (Q1 Jan-Mar)"
+    (granularidade `periodo_livre`) ou um ano solto (`anual`). Pra
+    granularidade `mensal` (chaves tipo "2023-01" ou "mMM-III"), o nome
+    genérico "mes_01" já é claro o bastante — aqui só enriquece quando
+    a chave carrega informação que "mes_NN" sozinho não tem."""
+    rotulos = []
+    for chave in meses_col:
+        if chave.startswith("periodo_") and "_" in chave[8:]:
+            rotulos.append(chave.split("_", 2)[-1])  # "periodo_001_2025 (ano completo)" -> "2025 (ano completo)"
+        elif re.fullmatch(r"\d{4}", chave):
+            rotulos.append(chave)  # granularidade anual — "2021", "2022"...
+        else:
+            rotulos.append(None)  # mensal — "mes_NN" sequencial já é claro
+    return rotulos
+
+
 def extrair_hierarquia_dre(wb, deteccao: dict, max_data_rows: int = 300) -> dict:
     """Reconstrói a hierarquia da DRE SEM nenhuma suposição de
     nomenclatura, em QUALQUER um dos dois formatos observados na prática
@@ -689,6 +775,7 @@ def extrair_hierarquia_dre(wb, deteccao: dict, max_data_rows: int = 300) -> dict
 
     resultado_indentacao = _extrair_hierarquia_por_indentacao(ws, header_row, meses_col, col_rotulo, max_data_rows)
     resultado_indentacao["modo"] = "indentacao"
+    resultado_indentacao["periodos_rotulos"] = _rotulos_legiveis_periodo(meses_col)
 
     if len(colunas_hier) <= 1:
         return resultado_indentacao
@@ -713,7 +800,9 @@ def extrair_hierarquia_dre(wb, deteccao: dict, max_data_rows: int = 300) -> dict
         pct = len(r["raizes_classificadas"]) / total if total else 0
         return (pct, total)
 
-    return max(resultado_indentacao, resultado_colunas, key=_qualidade)
+    vencedor = max(resultado_indentacao, resultado_colunas, key=_qualidade)
+    vencedor["periodos_rotulos"] = _rotulos_legiveis_periodo(meses_col)
+    return vencedor
 
 
 def _extrair_valores_da_linha(row, meses_col: dict) -> dict:
@@ -746,11 +835,28 @@ def _extrair_hierarquia_por_indentacao(ws, header_row: int, meses_col: dict, col
     if not linhas_brutas:
         return {"raizes_classificadas": {}, "raizes_ambiguas": [], "total_linhas_lidas": 0, "hierarquia_confiavel": True}
 
+    # IMPORTANTE (bug real corrigido em 25/08, DRE real "BPO Innova"):
+    # "nível mínimo = raiz" sozinho não basta quando a planilha mistura
+    # dois tipos de linha no MESMO nível mínimo — subtotais/resultados
+    # ("(=) SUBTOTAL X", nível 0) E linhas de despesa detalhada só um
+    # pouco mais indentadas ("(-) Despesa com Pessoal...", nível 1).
+    # Sem essa correção, a primeira linha "(=)..." de nível 0 (ex.: "(=)
+    # RECEITA LÍQUIDA") "engolia" como detalhe TODAS as despesas de
+    # nível 1 seguintes — que nunca eram somadas, derrubando o EBITDA
+    # calculado pra uma fração do valor real. A correção: qualquer linha
+    # com SINAL MECÂNICO PRÓPRIO ("(+)"/"(-)"/"(=)" no início do texto)
+    # sempre vira raiz, não importa o nível de indentação — o sinal já é
+    # uma marcação estrutural explícita de "isso é uma linha-chave",
+    # mais confiável que indentação sozinha quando os dois sinais
+    # coexistem. Continua usando só indentação (comportamento original)
+    # quando a planilha não tem sinal nenhum (ex.: CSF Hotelaria).
     nivel_raiz = min(l["nivel"] for l in linhas_brutas)
     raizes = []
     atual = None
     for l in linhas_brutas:
-        if l["nivel"] <= nivel_raiz:
+        eh_raiz_por_nivel = l["nivel"] <= nivel_raiz
+        eh_raiz_por_sinal = bool(_RE_SINAL.match(l["rotulo"]))
+        if eh_raiz_por_nivel or eh_raiz_por_sinal:
             atual = {"rotulo": l["rotulo"], "valores": l["valores"], "detalhes": []}
             raizes.append(atual)
         elif atual is not None:
@@ -954,6 +1060,25 @@ def calcular_resultado_de_hierarquia(hierarquia: dict) -> dict:
         "margem_operacional_pct": round(100 * soma_resultado_operacional / soma_receita, 1) if soma_receita else None,
         "convencao_sinal_despesa_detectada": "negativo" if soma_despesa_bruta < 0 else "positivo",
         "linhas_nao_somadas": [r["rotulo"] for r in hierarquia["raizes_ambiguas"]],
+        # Achado real em 25/08 (DRE "BPO Innova"): "margem_operacional_pct"
+        # acima mistura TODOS os níveis de despesa numa métrica só (do
+        # custo direto até tributos) — não corresponde a "Margem Bruta"
+        # nem "Margem EBITDA" especificamente, só a uma aproximação
+        # ampla. Quando a planilha já tem seus PRÓPRIOS subtotais/
+        # resultados calculados ("=" — Receita Líquida, Resultado
+        # Operacional, Lucro Líquido etc.), eles são MAIS CONFIÁVEIS que
+        # qualquer soma nossa (vêm prontos da fonte, sem risco de
+        # duplicar ou misturar nível de agregação errado). Em vez de
+        # tentar adivinhar qual desses é "Margem Bruta" vs "EBITDA" vs
+        # "Líquida" (isso varia de empresa pra empresa e exige juízo de
+        # negócio), entrega todos eles estruturados — o agente
+        # (financial_analysis) já demonstrou competência em interpretar
+        # isso corretamente num teste real (CSF Hotelaria, 25/08).
+        "linhas_resultado_da_fonte": [
+            {"rotulo": rotulo, "valores": dados["valores"]}
+            for rotulo, dados in hierarquia["raizes_classificadas"].items()
+            if dados["tipo"] == "resultado_calculado"
+        ],
         "fonte": "aproximacao_hierarquia_v1",  # nunca confundir com "rule_engine" fino — é aproximação
         "hierarquia_confiavel": hierarquia.get("hierarquia_confiavel", True),
     }
