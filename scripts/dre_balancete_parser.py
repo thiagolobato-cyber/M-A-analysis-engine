@@ -1082,3 +1082,89 @@ def calcular_resultado_de_hierarquia(hierarquia: dict) -> dict:
         "fonte": "aproximacao_hierarquia_v1",  # nunca confundir com "rule_engine" fino — é aproximação
         "hierarquia_confiavel": hierarquia.get("hierarquia_confiavel", True),
     }
+
+
+_RE_MB_RECEITA_BRUTA = re.compile(r"(?i)^\W*receitas?\W*$|receita.*(bruta|serv|venda|faturamento)")
+_RE_MB_RECEITA_LIQUIDA = re.compile(r"(?i)receita.*l[íi]quida")
+_RE_MB_DESPESA_PESSOAL = re.compile(r"(?i)despesa.*pessoal|folha\s*de\s*pagamento|custo.*folha")
+_RE_MB_CUSTO_SISTEMAS = re.compile(r"(?i)custo.*sistemas?(?!.*financeiro)|servi[çc]os?\s*de\s*sistema")
+_RE_MB_DEDUCAO_RECEITA = re.compile(r"(?i)dedu[çc][ãa]o.*receita|impostos?\s*s[/.]?\s*(venda|serviço|faturamento)|pis.*cofins")
+
+
+def _achar_linha_por_padrao(fonte: dict, padrao: re.Pattern, formato: str) -> dict | None:
+    """Busca uma linha por PALAVRA-CHAVE no rótulo — funciona tanto no
+    formato de `dre_estruturada` (caminho fino: {rótulo_ou_categoria:
+    {mes: valor}}) quanto em `raizes_classificadas` (hierarquia:
+    {rótulo: {"tipo":..., "valores": {mes: valor}}}).
+
+    IMPORTANTE (bug real corrigido em 26/08, achado testando a DRE do
+    BPO Innova): quando MAIS DE UMA linha bate o mesmo padrão (ex.:
+    "Custo Sistemas" batendo tanto "Serviços de Sistema" quanto "Custos
+    Sistemas" QUANTO o "SUBTOTAL CUSTO COM SISTEMAS" que já soma os
+    dois), pegar a primeira cegamente subestima o valor — o subtotal é
+    sempre a versão mais completa/agregada quando existe. Por isso
+    prioriza qualquer candidato com "subtotal"/"total" no rótulo; só cai
+    pro primeiro candidato "normal" se nenhum subtotal bater."""
+    candidatos = [(rotulo, dado) for rotulo, dado in fonte.items() if padrao.search(rotulo)]
+    if not candidatos:
+        return None
+    subtotais = [c for c in candidatos if re.search(r"(?i)subtotal|total\s*geral", c[0])]
+    rotulo, dado = (subtotais or candidatos)[0]
+    return dado["valores"] if formato == "hierarquia" else dado
+
+
+def extrair_margem_bruta_de_dre(dre_estruturada: dict | None, hierarquia: dict | None, regime_tributario: str | None) -> dict | None:
+    """Calcula Margem Bruta e Custo Folha % DIRETO DA DRE — decisão
+    explícita do Thiago em 26/08: "quem manda é a DRE, não o
+    formulário" pra margem. Antes, o Bloco A sempre usava
+    faturamento_mensal/folha_informada/custo_sistemas do FORMULÁRIO —
+    testando contra o BPO Innova real, isso deu 46,89% (formulário) vs.
+    55%/58% que o time humano já tinha validado usando a DRE.
+
+    Busca as 4 linhas necessárias (Receita Bruta, Despesa com Pessoal,
+    Custo Sistemas, Dedução de Receita) por PALAVRA-CHAVE no rótulo
+    original — tenta primeiro no caminho fino (`dre_estruturada`, mais
+    confiável quando reconhece), senão na hierarquia (`raizes_classificadas`
+    do fallback por indentação/colunas). Calcula margem POR PERÍODO (não
+    soma anos diferentes juntos — uma DRE com 2025 anual + 2026
+    trimestral nunca deveria ter os dois períodos somados numa margem
+    só, distorce a métrica).
+
+    Retorna None se não achar TODAS as 4 linhas necessárias em nenhuma
+    das duas fontes — nesse caso, quem chama deve cair pro formulário
+    como fallback, não travar."""
+    fontes = []
+    if dre_estruturada:
+        fontes.append((dre_estruturada, "fino"))
+    if hierarquia and hierarquia.get("raizes_classificadas"):
+        fontes.append((hierarquia["raizes_classificadas"], "hierarquia"))
+
+    for fonte, formato in fontes:
+        receita = _achar_linha_por_padrao(fonte, _RE_MB_RECEITA_BRUTA, formato)
+        if receita is None:
+            receita = _achar_linha_por_padrao(fonte, _RE_MB_RECEITA_LIQUIDA, formato)
+        despesa_pessoal = _achar_linha_por_padrao(fonte, _RE_MB_DESPESA_PESSOAL, formato)
+        custo_sistemas = _achar_linha_por_padrao(fonte, _RE_MB_CUSTO_SISTEMAS, formato)
+        deducao = _achar_linha_por_padrao(fonte, _RE_MB_DEDUCAO_RECEITA, formato)
+
+        if receita is None or despesa_pessoal is None or custo_sistemas is None:
+            continue  # não achou o mínimo necessário nesta fonte — tenta a próxima
+
+        margens_por_periodo = {}
+        custo_folha_por_periodo = {}
+        for periodo, valor_receita in receita.items():
+            if not valor_receita:
+                continue
+            vd = abs(despesa_pessoal.get(periodo, 0))
+            vc = abs(custo_sistemas.get(periodo, 0))
+            vi = abs(deducao.get(periodo, 0)) if deducao else 0
+            margens_por_periodo[periodo] = round(100 * (valor_receita - vd - vc - vi) / valor_receita, 2)
+            custo_folha_por_periodo[periodo] = round(100 * vd / valor_receita, 2)
+
+        if margens_por_periodo:
+            return {
+                "margem_bruta_pct_por_periodo": margens_por_periodo,
+                "custo_folha_pct_por_periodo": custo_folha_por_periodo,
+                "fonte": formato,
+            }
+    return None

@@ -42,6 +42,7 @@ from dre_balancete_parser import (
     dre_linhas_para_contas,
     extrair_hierarquia_dre,
     calcular_resultado_de_hierarquia,
+    extrair_margem_bruta_de_dre,
 )
 from financial_engine import (
     mapear_waterfall,
@@ -593,18 +594,74 @@ def run_extraction(deal_id: str):
         # Bloco A e B já calculados aqui, na extração — Complexity e
         # Viabilidade Financeira (agentes separados) só vão COPIAR isto
         # pra agent_runs depois, sem recalcular nada.
-        margem = calcular_margem_bruta(
-            mapeado["faturamento_mensal"], mapeado["folha_informada"], mapeado["custo_sistemas"],
-            mapeado["regime_tributario"], mapeado["rbt12"],
-        )
-        custo_folha_pct = (
-            100 * mapeado["folha_informada"] / mapeado["faturamento_mensal"]
-            if mapeado["faturamento_mensal"] else None
-        )
+        #
+        # PRIORIDADE DE FONTE PRA MARGEM BRUTA/CUSTO FOLHA (decisão
+        # explícita do Thiago em 26/08: "quem manda é a DRE, não o
+        # formulário"): testando contra o BPO Innova real, o formulário
+        # dava margem bruta de 46,89% (faturamento/folha/sistemas do
+        # formulário não batem com nenhum período real da DRE — parecem
+        # um "instantâneo" mais recente, preenchido à mão, não uma
+        # extração da DRE), enquanto a DRE bate quase exato com o que o
+        # time humano já tinha validado (55%/58%). Usa a DRE (via
+        # `extrair_margem_bruta_de_dre`, busca por palavra-chave nos
+        # rótulos — funciona tanto no caminho fino quanto na hierarquia)
+        # quando ela existir E tiver os componentes mínimos (receita,
+        # despesa com pessoal, custo sistemas); só cai pro formulário
+        # quando a DRE não tem esses componentes reconhecíveis.
+        primeira_dre_fina = next(iter(code_computed_dre.values()), None) if code_computed_dre else None
+        primeira_hierarquia = next(iter(code_computed_dre_hierarquia.values()), {}).get("hierarquia") if code_computed_dre_hierarquia else None
+        margem_de_dre = extrair_margem_bruta_de_dre(primeira_dre_fina, primeira_hierarquia, mapeado["regime_tributario"])
+
+        if margem_de_dre:
+            # Período mais recente = último do dict (mes_01=2025, mes_02=2026
+            # neste deal — a ordem já vem cronológica de `meses_para_coluna`).
+            ultimo_periodo = list(margem_de_dre["margem_bruta_pct_por_periodo"])[-1]
+            margem_bruta_pct_final = margem_de_dre["margem_bruta_pct_por_periodo"][ultimo_periodo]
+            custo_folha_pct = margem_de_dre["custo_folha_pct_por_periodo"][ultimo_periodo]
+            margem_bruta_calculada = {
+                "margem_bruta_pct": margem_bruta_pct_final,
+                "fonte": f"dre_{margem_de_dre['fonte']}",
+                "motivo": (
+                    "DRE disponível e com os componentes necessários (Receita, Despesa com "
+                    "Pessoal, Custo Sistemas) reconhecidos — prioridade sobre o formulário "
+                    "por decisão do Thiago em 26/08 (o formulário reflete um instantâneo "
+                    "recente preenchido à mão, a DRE é o histórico contábil real)."
+                ),
+                "todos_periodos": margem_de_dre["margem_bruta_pct_por_periodo"],
+            }
+        else:
+            # BUG REAL CORRIGIDO EM 26/08: esta variável só existia dentro
+            # deste branch, mas era referenciada mais abaixo (raw_extracted)
+            # de forma incondicional — quebrava com NameError toda vez que a
+            # DRE fosse a fonte usada (branch acima), que passou a ser o
+            # caminho mais comum depois da decisão "quem manda é a DRE".
+            margem_formulario = calcular_margem_bruta(
+                mapeado["faturamento_mensal"], mapeado["folha_informada"], mapeado["custo_sistemas"],
+                mapeado["regime_tributario"], mapeado["rbt12"],
+            )
+            margem_bruta_pct_final = margem_formulario["margem_bruta_pct"]
+            custo_folha_pct = (
+                100 * mapeado["folha_informada"] / mapeado["faturamento_mensal"]
+                if mapeado["faturamento_mensal"] else None
+            )
+            motivo_formulario = (
+                "Nenhuma DRE disponível nesse deal."
+                if not (code_computed_dre or code_computed_dre_hierarquia)
+                else "DRE disponível, mas sem os componentes necessários reconhecíveis "
+                     "(Receita/Despesa com Pessoal/Custo Sistemas) — caiu pro formulário."
+            )
+            margem_bruta_calculada = {
+                **margem_formulario,
+                "fonte": "formulario",
+                "motivo": motivo_formulario,
+            }
+
         bloco_a = avaliar_viabilidade_financeira(
-            margem["margem_bruta_pct"], custo_folha_pct,
+            margem_bruta_pct_final, custo_folha_pct,
             mapeado["inadimplencia_media_pct"], mapeado["churn_medio_pct"], mapeado["perfil_restrito_presente"],
         )
+        bloco_a["margem_bruta_fonte"] = margem_bruta_calculada["fonte"]
+        bloco_a["margem_bruta_motivo"] = margem_bruta_calculada["motivo"]
         custo_sistemas_pct = (
             100 * mapeado["custo_sistemas"] / mapeado["faturamento_mensal"]
             if mapeado["faturamento_mensal"] else None
@@ -620,7 +677,7 @@ def run_extraction(deal_id: str):
         output.setdefault("structured", {}).update(
             {k: v for k, v in mapeado.items() if k != "avisos_mapeamento"}
         )
-        output.setdefault("raw_extracted", {})["margem_bruta_calculada"] = margem
+        output.setdefault("raw_extracted", {})["margem_bruta_calculada"] = margem_bruta_calculada
         output.setdefault("raw_extracted", {})["viabilidade_financeira_calculada"] = bloco_a
         output.setdefault("raw_extracted", {})["complexidade_operacional_calculada"] = bloco_b.to_agent_run_output()
         output.setdefault("raw_extracted", {})["riscos_operacionais_calculados"] = avaliar_riscos_operacionais(mapeado)

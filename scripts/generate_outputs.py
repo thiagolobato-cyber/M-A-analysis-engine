@@ -340,7 +340,19 @@ def build_excel(bundle: dict, path: str):
     vf = agents.get("viabilidade_financeira", {}).get("output", {}) or {}
     ws["A1"] = "Classificação"; ws["A1"].font = title_font
     ws["B1"] = vf.get("classificacao", "não avaliado")
-    row = 3
+    # Fonte da Margem Bruta (achado real em 26/08, pedido explícito do
+    # Thiago: "deve ficar claro se foi usado o formulário ou excel e
+    # por quê" — antes essa informação existia no dado interno mas não
+    # aparecia em lugar nenhum do Excel/PPT que o usuário de fato vê).
+    ws["A2"] = "Fonte da Margem Bruta"; ws["A2"].font = title_font
+    fonte_legivel = {
+        "dre_fino": "DRE (categorização automática)", "dre_hierarquia": "DRE (extração por hierarquia)",
+        "formulario": "Formulário",
+    }.get(vf.get("margem_bruta_fonte"), vf.get("margem_bruta_fonte", "não avaliado"))
+    ws["B2"] = fonte_legivel
+    ws["A3"] = "Motivo"; ws["A3"].font = title_font
+    ws["B3"] = vf.get("margem_bruta_motivo", "")
+    row = 5
     ws.cell(row=row, column=1, value="Critério").font = title_font
     ws.cell(row=row, column=2, value="Faixa").font = title_font
     row += 1

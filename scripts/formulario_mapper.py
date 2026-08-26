@@ -45,17 +45,42 @@ CAMPOS_FORMULARIO = {
     "infraestrutura": [r"infraestrutura\s*do\s*sistema"],
     "outsourcing_sistemas_pct": [r"faturamento\s*mensal\s*sistemas\s*do\s*cliente"],
     "outsourcing_pessoas_pct": [r"pessoas\s*alocadas\s*no\s*cliente"],
+    "outsourcing_sistemas_clientes_qtd": [r"clientes\s*atendidos\s*no\s*caso\s*acima"],
+    "outsourcing_pessoas_clientes_qtd": [r"clientes\s*que\s*possuem\s*pessoas\s*alocadas"],
     "inadimplencia_pct": [r"inadimpl[êe]ncia"],
     "churn_pct": [r"churn"],
 }
 
 
 def _pct_para_100(valor) -> float | None:
-    """O formulário grava porcentagem como fração (0.2 = 20%) — o motor de
-    regras espera 0-100."""
+    """Normaliza porcentagem pra escala 0-100 — o motor de regras espera
+    0-100 (ex.: 8 = 8%, não 0.08).
+
+    BUG REAL CORRIGIDO EM 25-26/08: esta função multiplicava por 100
+    incondicionalmente, assumindo que o formulário sempre grava
+    porcentagem como fração (0.2 = 20%). Testando contra os 2
+    formulários reais já processados (BPO Innova e CSF Hotelaria — 10
+    campos percentuais no total), NENHUM vem como fração — todos já
+    vêm como número inteiro direto (90 = 90%, 8 = 8%, até 1 = 1%).
+    Multiplicar sempre por 100 dava valores 100x maiores em TODOS os
+    casos reais (churn virando "800%", concentração virando "9000%" —
+    o próprio agente `cfo_synthesis` sinalizou isso como
+    "matematicamente impossível" num teste real, 26/08). Isso não é um
+    bug introduzido agora — afeta qualquer deal já processado antes
+    desta correção.
+
+    Uma primeira tentativa de correção multiplicava só quando o valor
+    vinha <=1 (assumindo fração só nesse caso) — mas isso quebrou um
+    caso real também: inadimplência=1.0 (significa 1%) virava 100.0.
+    Como os 10 valores reais já vistos NUNCA usam fração — nem os
+    pequenos (inadimplência=1, outsourcing=2) — a correção mais segura,
+    apoiada na evidência real disponível, é não multiplicar nunca. Se
+    algum dia aparecer um formulário real que genuinamente grave como
+    fração, essa é a função a revisar de novo — com o exemplo real em
+    mãos, não por suposição."""
     if valor is None:
         return None
-    return round(float(valor) * 100, 4)
+    return round(float(valor), 4)
 
 
 def _detectar_fora_grande_sp(endereco: str | None) -> bool | None:
@@ -138,6 +163,21 @@ def detectar_e_extrair_formulario(file_bytes: bytes) -> dict | None:
     return None
 
 
+def _pct_clientes(qtd_clientes, total_clientes) -> float | None:
+    """Outsourcing como % de CLIENTES envolvidos sobre a carteira total —
+    não % de faturamento. Achado real em 26/08 (Thiago, revisando a
+    matriz de regras): o critério 8/9 do Bloco B ("Outsourcing — Pessoas
+    Alocadas"/"Sistemas do Cliente") deveria usar a proporção de
+    CLIENTES com outsourcing, não a fração da RECEITA que eles
+    representam — são perguntas diferentes, e usar a errada muda o
+    resultado de forma grave (no BPO Innova real: outsourcing de
+    pessoas por % de faturamento = 60% (>15%, "Alta"); por % de
+    clientes = 3/31 ≈ 9,7% ("Baixa") — classificação oposta)."""
+    if qtd_clientes is None or not total_clientes:
+        return None
+    return round(float(qtd_clientes) / float(total_clientes) * 100, 2)
+
+
 def mapear_formulario(respostas_canonicas: dict, rbt12_real: float | None = None) -> dict:
     """`respostas_canonicas` é o dict {campo_canonico: valor} que
     `extrair_respostas_linha` já produziu. Retorna pronto pra **desempacotar**
@@ -204,8 +244,14 @@ def mapear_formulario(respostas_canonicas: dict, rbt12_real: float | None = None
         "sistema_financeiro_e_omie": sistema_financeiro_e_omie,
         "sistema_utilizado_texto": g("sistema_erp"),
         "sistema_hospedagem": _normalizar_hospedagem(g("infraestrutura")),
-        "outsourcing_pessoas_pct": _pct_para_100(g("outsourcing_pessoas_pct")),
-        "outsourcing_sistemas_pct": _pct_para_100(g("outsourcing_sistemas_pct")),
+        "outsourcing_pessoas_pct": _pct_clientes(g("outsourcing_pessoas_clientes_qtd"), g("numero_clientes")),
+        "outsourcing_sistemas_pct": _pct_clientes(g("outsourcing_sistemas_clientes_qtd"), g("numero_clientes")),
+        # Dado auxiliar (não usado no motor de regras) — % de FATURAMENTO
+        # que esses clientes com outsourcing representam, pra contexto
+        # qualitativo. Guardado, não descartado, mesmo não sendo mais a
+        # fonte do critério Bloco B.
+        "outsourcing_pessoas_pct_faturamento": _pct_para_100(g("outsourcing_pessoas_pct")),
+        "outsourcing_sistemas_pct_faturamento": _pct_para_100(g("outsourcing_sistemas_pct")),
 
         "avisos_mapeamento": avisos_mapeamento,
     }
