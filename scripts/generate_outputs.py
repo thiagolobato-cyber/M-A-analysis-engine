@@ -20,6 +20,7 @@ Drive estiver pronto, isso vira um upload automático além do artifact
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.request
 import urllib.error
@@ -28,6 +29,8 @@ from datetime import datetime, timezone
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+
+from dre_balancete_parser import agregar_linhas_por_trimestre
 
 from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
@@ -485,6 +488,7 @@ def _add_table(slide, left, top, width, row_h, headers, rows, header_fill=NAVY,
     return gshape
 
 
+
 def _fmt_mil(v) -> str:
     """R$ mil, formato brasileiro — compacto, como o teaser de referência."""
     if v is None:
@@ -572,38 +576,45 @@ def build_pptx(bundle: dict, path: str):
     _badge(s, MARGIN, Inches(1.2), Inches(2.8), Inches(0.44), f"Financeiro: {fin_result}",
            fill_hex=DANGER if fin_result == "Crítico" else (WARN if fin_result == "Atenção" else SUCCESS), size=12)
 
-    # Mini-DRE (26/08, pedido do Thiago) — tabela de verdade, não texto
-    # corrido. Só aparece quando a DRE foi reconhecida (`mini_dre`
-    # calculada 100% em código na extração); cai pro EBITDA Bridge
-    # clássico (bottom-up, texto) quando não há DRE nesse deal.
-    mini_dre = next(iter((raw_extracted.get("mini_dre") or {}).values()), None)
+    # Tabela "Viabilidade Financeira" (26/08, pedido do Thiago) — MESMA
+    # fonte que o Excel usa agora (antes o PPT ainda usava a mini-DRE
+    # antiga, uma versão mais simples — bug real achado comparando os
+    # dois: números e estrutura divergiam entre PPT e Excel do mesmo
+    # deal). Agrega em trimestres quando há mais de 4 períodos — achado
+    # real no deal "Nacional" (12 meses reais): a tabela mensal ficava
+    # ilegível no slide, números quebrados em várias linhas dentro da
+    # célula por falta de espaço.
+    tabela_viab = next(iter((raw_extracted.get("tabela_viabilidade_financeira") or {}).values()), None)
     table_top = Inches(1.85)
-    if mini_dre and mini_dre.get("linhas"):
-        linhas_dre = mini_dre["linhas"]
+    if tabela_viab and tabela_viab.get("linhas"):
+        linhas_dre = agregar_linhas_por_trimestre(tabela_viab["linhas"])
         headers = ["R$ mil"] + [l["periodo"] for l in linhas_dre]
         campos = [
-            ("Receita Bruta", "receita_bruta"), ("(-) Deduções", "deducoes"),
-            ("(=) Receita Líquida", "receita_liquida"), ("(-) Despesa com Pessoal", "despesa_pessoal"),
-            ("(-) Custo Sistemas", "custo_sistemas"), ("(-) Outras Despesas", "outras_despesas"),
-            ("(=) Resultado", "resultado"),
+            ("Receita Bruta", "receita_bruta"), ("(=) Receita Líquida", "receita_liquida"),
+            ("(-) Folha de Pagamento", "folha_pagamento"), ("(-) Custo Sistemas", "custo_sistemas"),
+            ("Margem Bruta %", "margem_bruta_pct"), ("(-) Despesas Gerais", "despesas_gerais"),
+            ("(=) Lucro Operacional", "lucro_operacional"), ("Margem EBITDA %", "margem_ebitda_pct"),
         ]
         rows = []
         for label, campo in campos:
-            valores = [_fmt_mil(l.get(campo)) for l in linhas_dre]
+            if campo.endswith("_pct"):
+                valores = [f"{l[campo]}%" if l.get(campo) is not None else "—" for l in linhas_dre]
+            else:
+                valores = [_fmt_mil(l.get(campo)) for l in linhas_dre]
             rows.append([label] + valores)
-        rows.append(["Margem %"] + [f"{l['margem_pct']}%" if l.get("margem_pct") is not None else "—" for l in linhas_dre])
-        col_widths = [Inches(2.3)] + [Inches((5.8 - 2.3) / len(linhas_dre))] * len(linhas_dre)
+        col_widths = [Inches(2.1)] + [Inches((5.8 - 2.1) / len(linhas_dre))] * len(linhas_dre)
         row_h = Inches(0.34)
         _add_table(s, MARGIN, table_top, Inches(5.8), row_h, headers, rows,
-                   col_widths=col_widths, size=10.5, header_size=10.5, highlight_rows={2})
+                   col_widths=col_widths, size=10, header_size=9.5, highlight_rows={1, 6})
         # Posição da nota de rodapé calculada a partir da altura REAL da
         # tabela (linhas de dado + cabeçalho), não um valor fixo — bug
         # real achado na QA visual (26/08): um valor fixo colidia com o
         # título "EBITDA BRIDGE" logo abaixo quando a tabela tinha mais
         # linhas que o previsto.
         nota_top = table_top + row_h * (len(rows) + 1) + Inches(0.08)
+        nota_periodo = " (agregado por trimestre)" if len(tabela_viab["linhas"]) > 4 else ""
         _add_textbox(s, MARGIN, nota_top, Inches(5.8), Inches(0.35),
-                     f"Fonte: DRE ({mini_dre['fonte']}) — não confundir com o EBITDA Bridge ao lado (metodologia diferente).",
+                     f"Fonte: DRE ({tabela_viab['fonte']}){nota_periodo} — não confundir com o EBITDA Bridge ao lado (metodologia diferente).",
                      size=9, color=TEXT_MUTED)
         body_bottom = nota_top + Inches(0.45)
     else:

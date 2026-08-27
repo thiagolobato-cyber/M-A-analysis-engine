@@ -1090,17 +1090,17 @@ def calcular_resultado_de_hierarquia(hierarquia: dict) -> dict:
 
 _RE_MB_RECEITA_BRUTA = re.compile(r"(?i)^\W*receitas?\W*$|receita.*(bruta|serv|venda|faturamento)")
 _RE_MB_RECEITA_LIQUIDA = re.compile(r"(?i)receita.*l[íi]quida")
-_RE_MB_DESPESA_PESSOAL = re.compile(r"(?i)despesa.*pessoal|folha\s*de\s*pagamento|custo.*folha|\bfolha\b")
-_RE_MB_CUSTO_SISTEMAS = re.compile(r"(?i)custo.*sistemas?(?!.*financeiro)|servi[çc]os?\s*de\s*sistema|\bsistemas?\b(?!.*financeiro)")
-_RE_MB_DEDUCAO_RECEITA = re.compile(r"(?i)dedu[çc][ãa]o.*receita|impostos?\s*s[/.]?\s*(venda|serviço|faturamento)|pis.*cofins|^\W*dedu[çc][õo]es?\W*$")
-_RE_MB_RESULTADO = re.compile(r"(?i)resultado\s+operacional|resultado.*l[íi]quido|lucro.*l[íi]quido")
+_RE_MB_DESPESA_PESSOAL = re.compile(r"(?i)despesa.*pessoal|folha[\s_]*de[\s_]*pagamento|custo.*folha|\bfolha\b|\brh\b")
+_RE_MB_CUSTO_SISTEMAS = re.compile(r"(?i)custo.*sistemas?(?!.*financeiro)|servi[çc]os?[\s_]*de[\s_]*sistema|\bsistemas?\b(?!.*financeiro)")
+_RE_MB_DEDUCAO_RECEITA = re.compile(r"(?i)dedu[çc][ãa]o.*receita|impostos?[\s_]*(s[/.]?[\s_]*|sobre[\s_]+)(venda|servi[çc]o|faturamento|receita)|pis.*cofins|^\W*dedu[çc][õo]es?\W*$")
+_RE_MB_RESULTADO = re.compile(r"(?i)resultado[\s_]+operacional|resultado.*l[íi]quido|lucro.*l[íi]quido")
 # Marcador de linha NÃO-operacional — usado só como DESEMPATE quando
 # múltiplas linhas batem o mesmo padrão (achado real no Plannea: "Folha
 # Operacional" E "Folha Diretoria" batem "folha", mas só a primeira é o
 # custo de pessoal que a fórmula de Margem Bruta espera — a segunda é
 # despesa administrativa/de sócio, contá-la infla o custo e distorce a
 # margem pra bem longe do que o time humano validou).
-_RE_MB_NAO_OPERACIONAL = re.compile(r"(?i)diretoria|s[óo]cio|pr[óo]-labore|administrat")
+_RE_MB_NAO_OPERACIONAL = re.compile(r"(?i)diretoria|diretor(es)?\b|s[óo]cio|pr[óo]-labore|administrat")
 
 
 def _achar_linha_por_padrao(fonte: dict, padrao: re.Pattern, formato: str) -> dict | None:
@@ -1172,8 +1172,15 @@ def extrair_margem_bruta_de_dre(dre_estruturada: dict | None, hierarquia: dict |
         custo_sistemas = _achar_linha_por_padrao(fonte, _RE_MB_CUSTO_SISTEMAS, formato)
         deducao = _achar_linha_por_padrao(fonte, _RE_MB_DEDUCAO_RECEITA, formato)
 
-        if receita is None or despesa_pessoal is None or custo_sistemas is None:
+        if receita is None or despesa_pessoal is None:
             continue  # não achou o mínimo necessário nesta fonte — tenta a próxima
+        # custo_sistemas é OPCIONAL — achado real no Nacional: essa DRE
+        # não separa "Custo Sistemas" como linha própria (só existe no
+        # formulário), e antes a função inteira desistia por causa
+        # disso, mesmo já tendo receita e despesa com pessoal — os 2
+        # componentes que realmente definem a Margem Bruta. Ausente
+        # vira 0 (não distorce o cálculo, só não desconta o que nunca
+        # existiu como linha na DRE).
 
         margens_por_periodo = {}
         custo_folha_por_periodo = {}
@@ -1183,11 +1190,19 @@ def extrair_margem_bruta_de_dre(dre_estruturada: dict | None, hierarquia: dict |
             if not valor_receita:
                 continue
             vd = abs(despesa_pessoal.get(periodo, 0))
-            vc = abs(custo_sistemas.get(periodo, 0))
+            vc = abs(custo_sistemas.get(periodo, 0)) if custo_sistemas else 0
             vi = abs(deducao.get(periodo, 0)) if deducao else 0
             margens_por_periodo[periodo] = round(100 * (valor_receita - vd - vc - vi) / valor_receita, 2)
             custo_folha_por_periodo[periodo] = round(100 * vd / valor_receita, 2)
-            custo_sistemas_por_periodo[periodo] = round(100 * vc / valor_receita, 2)
+            # None (não 0.0) quando a linha de custo de sistemas não foi
+            # encontrada nesta DRE — achado real no Nacional (26/08): a
+            # DRE resumida não desagrega custo de sistemas numa linha
+            # própria (fica embutido em outras categorias), e reportar
+            # "0.0%" escondia isso do código downstream, que passava a
+            # achar que já tinha um valor válido da DRE e nunca caía pro
+            # fallback do formulário (onde o dado de verdade estava:
+            # 2,57%, batendo com os "3%" do gabarito humano).
+            custo_sistemas_por_periodo[periodo] = round(100 * vc / valor_receita, 2) if custo_sistemas else None
             receita_bruta_por_periodo[periodo] = valor_receita
 
         if margens_por_periodo:
@@ -1401,3 +1416,124 @@ def montar_tabela_viabilidade_financeira(dre_estruturada: dict | None, hierarqui
         if linhas:
             return {"linhas": linhas, "fonte": formato, "d_a_reconhecido": d_a is not None}
     return None
+
+
+def agrupar_dre_linhas_por_trimestre(dre_linhas: dict, periodos_rotulos: list | None, limiar: int = 6) -> tuple[dict, list]:
+    """Agrupa uma DRE mensal em trimestres quando há muitos períodos —
+    achado real em 26/08, deal "Nacional" (12 meses de DRE): o contexto
+    de entrada ficando grande demais (12 colunas por linha, formatado
+    por período) parece ter levado o agente `opinion` a tentar produzir
+    uma resposta proporcionalmente grande, que foi truncada pelo limite
+    de tokens de saída do modelo — o job quebrou (`RuntimeError: Resposta
+    do agente não é um JSON válido`), depois de já ter sido gerada e
+    paga. Isso também é a mesma causa do PPT quebrando: uma tabela de 12
+    colunas não cabe legível em nenhum slide (achado real, mesmo deal —
+    "a parte de resultado quebrou").
+
+    Só agrupa quando há MAIS que `limiar` períodos (limiar=6 cobre
+    qualquer DRE mensal de 7+ meses, sem afetar os casos de 2-4 períodos
+    já testados — BPO Innova, Plannea). Soma os valores de cada linha
+    dentro do trimestre (nunca soma percentuais já calculados — os
+    percentuais são sempre recalculados DEPOIS, a partir dos valores
+    absolutos agregados, em quem consome isto). Rótulos viram "T1", "T2"
+    etc., ou "T1 2025" quando o rótulo original já tem o ano.
+
+    Retorna (dre_linhas_agrupada, periodos_rotulos_agrupados) — mesmo
+    formato de entrada, pronto pra usar em `format_dre_table`,
+    `montar_mini_dre` e `montar_tabela_viabilidade_financeira` sem
+    mudar mais nada nelas."""
+    meses_disponiveis = sorted({m for valores in dre_linhas.values() for m in valores})
+    if len(meses_disponiveis) <= limiar:
+        return dre_linhas, periodos_rotulos
+
+    # Agrupa de 3 em 3, na ordem que os meses já vêm (mes_01, mes_02...)
+    # Reindexa como "mes_NN" (não "tri_NN") — mesmo padrão de chave já
+    # usado em todo o resto do código pra "período sequencial genérico"
+    # (o mesmo padrão já vale pra granularidade anual/período livre);
+    # usar um prefixo diferente quebrava a leitura em `format_dre_table`
+    # e em quem mais espera essa convenção (bug real achado testando
+    # contra a DRE do Nacional — todos os valores saíam vazios).
+    grupos = [meses_disponiveis[i:i + 3] for i in range(0, len(meses_disponiveis), 3)]
+    dre_agrupada = {}
+    for rotulo, valores in dre_linhas.items():
+        novos_valores = {}
+        for i, grupo in enumerate(grupos):
+            chave_trimestre = f"mes_{i + 1:02d}"
+            soma = sum(valores.get(m, 0) or 0 for m in grupo if isinstance(valores.get(m), (int, float)))
+            if any(m in valores for m in grupo):
+                novos_valores[chave_trimestre] = soma
+        dre_agrupada[rotulo] = novos_valores
+
+    # Rótulos de período agrupados — usa o ano do primeiro mês do
+    # trimestre quando disponível no rótulo original (ex.: "2025-01" ->
+    # "T1 2025"); cai pra "T1".."T4" simples quando não dá pra inferir.
+    novos_rotulos = []
+    for i, grupo in enumerate(grupos):
+        idx_primeiro_mes = meses_disponiveis.index(grupo[0])
+        ano = None
+        if periodos_rotulos and idx_primeiro_mes < len(periodos_rotulos) and periodos_rotulos[idx_primeiro_mes]:
+            m = re.search(r"(20\d{2})", str(periodos_rotulos[idx_primeiro_mes]))
+            if m:
+                ano = m.group(1)
+        novos_rotulos.append(f"T{i + 1} {ano}" if ano else f"T{i + 1}")
+
+    return dre_agrupada, novos_rotulos
+
+
+def agregar_linhas_por_trimestre(linhas: list) -> list:
+    """Agrega linhas mensais (formato lista de `montar_mini_dre`/
+    `montar_tabela_viabilidade_financeira`) em trimestres — usado tanto
+    no PPT (espaço limitado no slide) quanto no contexto enviado pros
+    agentes de IA (reduzir tokens de entrada), achado real em 26/08
+    (deal "Nacional", 12 meses reais): uma tabela de 12 colunas no slide
+    ficava ilegível (números quebrados em várias linhas dentro da
+    célula), e o mesmo volume de dados no contexto do agente `opinion`
+    parece ter contribuído pra sua resposta ser truncada pelo limite de
+    tokens de saída do modelo. O Excel continua mostrando mês a mês (tem
+    espaço de sobra, pedido explícito do Thiago: "Excel deve ser mensal
+    mesmo").
+
+    IMPORTANTE: soma os valores monetários e RECALCULA as margens % a
+    partir dos totais agregados — nunca faz média simples de
+    percentuais (isso seria matematicamente errado quando os meses têm
+    receitas de tamanhos diferentes; a margem do trimestre tem que vir
+    de receita_trimestre/resultado_trimestre, não da média das margens
+    mensais)."""
+    if len(linhas) <= 4:
+        return linhas
+    grupos = [linhas[i:i + 3] for i in range(0, len(linhas), 3)]
+    campos_soma = [
+        "receita_bruta", "impostos", "deducoes", "receita_liquida", "folha_pagamento",
+        "despesa_pessoal", "custo_sistemas", "margem_bruta_rs", "outras_despesas",
+        "despesas_gerais", "lucro_operacional", "resultado", "d_a", "margem_ebitda_rs",
+    ]
+    agregadas = []
+    for idx_grupo, grupo in enumerate(grupos):
+        if not grupo:
+            continue
+        rotulos = [l["periodo"] for l in grupo]
+        # Rótulo "T1".."T4" — achado real testando com a DRE do Nacional
+        # (26/08): rótulos originais mensais genéricos ("mes_01") viravam
+        # "mes_01 a mes_03" quando concatenados, o que não lê bem numa
+        # tabela. "T1"/"T2" é sempre claro, independente do formato do
+        # rótulo de entrada. Só usa o range original como rótulo quando
+        # ele já parece um nome de verdade (não bate "mes_NN" genérico).
+        parece_generico = all(re.fullmatch(r"mes_\d+", r or "") for r in rotulos)
+        if parece_generico or len(rotulos) <= 1:
+            nova = {"periodo": f"T{idx_grupo + 1}"}
+        else:
+            nova = {"periodo": f"{rotulos[0]} a {rotulos[-1]}" if len(rotulos) > 1 else rotulos[0]}
+        for campo in campos_soma:
+            valores = [l[campo] for l in grupo if l.get(campo) is not None]
+            nova[campo] = round(sum(valores), 2) if valores else None
+        receita_base = nova.get("receita_bruta")
+        if receita_base:
+            if nova.get("margem_bruta_rs") is not None:
+                nova["margem_bruta_pct"] = round(100 * nova["margem_bruta_rs"] / receita_base, 2)
+            if nova.get("resultado") is not None:
+                nova["margem_pct"] = round(100 * nova["resultado"] / receita_base, 2)
+        receita_liq_base = nova.get("receita_liquida")
+        if receita_liq_base and nova.get("margem_ebitda_rs") is not None:
+            nova["margem_ebitda_pct"] = round(100 * nova["margem_ebitda_rs"] / receita_liq_base, 2)
+        agregadas.append(nova)
+    return agregadas

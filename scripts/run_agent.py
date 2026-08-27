@@ -45,6 +45,8 @@ from dre_balancete_parser import (
     extrair_margem_bruta_de_dre,
     montar_mini_dre,
     montar_tabela_viabilidade_financeira,
+    agrupar_dre_linhas_por_trimestre,
+    agregar_linhas_por_trimestre,
     _rotulos_legiveis_periodo,
 )
 from financial_engine import (
@@ -402,7 +404,21 @@ def excel_to_text(file_bytes: bytes, filename: str) -> tuple[str, list, dict, di
         )
         if caminho_fino_produz_ebitda:
             periodos_rotulos_fino = periodos_rotulos_teste
-            parts.append(format_dre_table(dre_linhas, periodos_rotulos_fino, dre_deteccao["granularidade"]))
+            dre_linhas_para_prompt, periodos_rotulos_para_prompt = dre_linhas, periodos_rotulos_fino
+            if dre_deteccao["granularidade"] == "mensal":
+                # Agrupamento trimestral SÓ NO TEXTO QUE VAI PRO AGENTE
+                # (26/08, achado real — deal "Nacional", 12 meses de
+                # DRE): sem isso, o contexto ficou grande o bastante pra
+                # resposta do agente `opinion` ser truncada pelo limite
+                # de tokens de saída do modelo (job quebrou depois de já
+                # ter sido gerado e pago). NÃO agrupa `dre_linhas` em si
+                # — essa variável segue alimentando `mini_dre`/
+                # `tabela_viabilidade_financeira`/Excel, que devem manter
+                # o detalhe mensal completo (o Thiago pediu agrupamento
+                # só "no PPT", que é tratado separadamente em
+                # generate_outputs.py). Só ativa com mais de 6 períodos.
+                dre_linhas_para_prompt, periodos_rotulos_para_prompt = agrupar_dre_linhas_por_trimestre(dre_linhas, periodos_rotulos_fino)
+            parts.append(format_dre_table(dre_linhas_para_prompt, periodos_rotulos_para_prompt, dre_deteccao["granularidade"]))
         else:
             # Caminho fino (regex de nomenclatura conhecida) não achou
             # nada — achado real em 25/08: acontece sempre que a empresa
@@ -839,7 +855,11 @@ def run_extraction(deal_id: str):
         # palavra-chave), sem nova chamada.
         if margem_de_dre and margem_de_dre.get("custo_sistemas_pct_por_periodo"):
             ultimo_periodo_b = list(margem_de_dre["margem_bruta_pct_por_periodo"])[-1]
-            custo_sistemas_pct = margem_de_dre["custo_sistemas_pct_por_periodo"][ultimo_periodo_b]
+            custo_sistemas_pct_dre = margem_de_dre["custo_sistemas_pct_por_periodo"].get(ultimo_periodo_b)
+        else:
+            custo_sistemas_pct_dre = None
+        if custo_sistemas_pct_dre is not None:
+            custo_sistemas_pct = custo_sistemas_pct_dre
         else:
             custo_sistemas_pct = (
                 100 * mapeado["custo_sistemas"] / mapeado["faturamento_mensal"]
@@ -940,36 +960,67 @@ def call_claude(system_prompt: str, deal_data: dict, other_outputs: dict | None 
 
     full_prompt = system_prompt + "\n\n# Dados do deal\n\n" + json.dumps(user_payload, ensure_ascii=False, indent=2)
 
-    result = subprocess.run(
-        ["claude", "-p", "--model", model or DEFAULT_MODEL_ALIAS, "--output-format", "json"],
-        input=full_prompt,
-        capture_output=True,
-        text=True,
-        timeout=600,  # prompts grandes com Opus podem demorar mais que os 300s originais
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"claude -p saiu com código {result.returncode}\n"
-            f"--- stderr ---\n{result.stderr!r}\n"
-            f"--- stdout (primeiros 2000 chars) ---\n{result.stdout[:2000]!r}"
+    # Retry (26/08, achado real em produção — job "opinion" quebrou com
+    # o deal "Nacional", 12 meses de DRE): resposta truncada no meio,
+    # nenhum dos 4 níveis de `_extract_json` conseguiu recuperar — sinal
+    # de que o JSON ficou genuinamente incompleto (não é bug de parsing,
+    # é a geração ter sido cortada). Isso derrubava o job inteiro depois
+    # da chamada já ter sido gerada e PAGA — não repetir seria jogar
+    # fora um resultado quase certo de já ter funcionado numa 2ª
+    # tentativa (é comportamento raro/esporádico, não sistemático — os
+    # outros 10 agentes do mesmo run passaram na 1ª tentativa).
+    ultimo_erro = None
+    for tentativa in range(1, 3):
+        result = subprocess.run(
+            ["claude", "-p", "--model", model or DEFAULT_MODEL_ALIAS, "--output-format", "json"],
+            input=full_prompt,
+            capture_output=True,
+            text=True,
+            timeout=600,  # prompts grandes com Opus podem demorar mais que os 300s originais
         )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"claude -p saiu com código {result.returncode}\n"
+                f"--- stderr ---\n{result.stderr!r}\n"
+                f"--- stdout (primeiros 2000 chars) ---\n{result.stdout[:2000]!r}"
+            )
 
-    # --output-format json do Claude Code envolve a resposta num envelope;
-    # o campo com o texto do agente é "result" (confirmado no teste de 17/08).
-    raw = json.loads(result.stdout)
-    agent_text = raw.get("result", raw.get("content", result.stdout))
+        # --output-format json do Claude Code envolve a resposta num
+        # envelope; o campo com o texto do agente é "result" (confirmado
+        # no teste de 17/08).
+        raw = json.loads(result.stdout)
+        agent_text = raw.get("result", raw.get("content", result.stdout))
 
-    parsed = _extract_json(agent_text)
-    if parsed is None:
-        raise RuntimeError(f"Resposta do agente não é um JSON válido.\nResposta bruta: {agent_text[:500]}")
-    return parsed
+        parsed = _extract_json(agent_text)
+        if parsed is not None:
+            return parsed
+        ultimo_erro = agent_text
+        print(f"[aviso] tentativa {tentativa}/2 — resposta do agente não é JSON válido, tentando de novo. "
+              f"Motivo de parada informado pelo Claude Code: {raw.get('stop_reason', raw.get('subtype', 'não informado'))}",
+              file=sys.stderr)
+
+    raise RuntimeError(f"Resposta do agente não é um JSON válido (2 tentativas).\nÚltima resposta bruta: {ultimo_erro[:500]}")
 
 
 def _extract_json(text: str) -> dict | None:
     """Extrai JSON de uma resposta de LLM, tolerando variações comuns:
     JSON puro, cercado em ```json ... ```, cercado em ``` ... ``` simples,
     ou com texto explicativo antes/depois do bloco. Tenta na ordem do mais
-    estrito pro mais tolerante."""
+    estrito pro mais tolerante.
+
+    BUG REAL CORRIGIDO EM 26/08 (achado em produção — job 'opinion'
+    falhou, jogando fora uma chamada de API inteira já paga): o passo 2
+    usava uma regex não-gulosa (`\\{.*?\\}`) pra achar o bloco entre
+    ```json e ``` — isso quebra com QUALQUER JSON aninhado (objeto
+    dentro de objeto), porque o `.*?` para no PRIMEIRO "}" que encontra,
+    que é o fechamento do objeto INTERNO, não do principal. O JSON
+    capturado ficava incompleto (sem o "}" de fechamento de verdade),
+    dava erro de parse, e a resposta inteira — já gerada e paga — era
+    descartada. Substituído por contagem de chaves balanceada (conta
+    "{"/"}" ignorando os que aparecem DENTRO de strings, pra não se
+    confundir com chave sendo mencionada como texto livre num campo tipo
+    "parecer_do_time") — isso encontra o "}" que fecha corretamente o
+    primeiro "{", não importa quantos níveis de aninhamento existam."""
     text = text.strip()
 
     # 1. JSON puro
@@ -978,15 +1029,54 @@ def _extract_json(text: str) -> dict | None:
     except json.JSONDecodeError:
         pass
 
-    # 2. Bloco cercado em ```json ... ``` ou ``` ... ```, em qualquer parte do texto
-    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if fence_match:
+    # 2. Remove os marcadores de bloco markdown (```json / ```) do
+    # início e fim, se existirem, e tenta de novo como JSON puro —
+    # cobre o caso mais comum (resposta é só o bloco cercado, nada
+    # antes/depois) sem depender de regex nenhuma.
+    sem_cerca = re.sub(r"^```(?:json)?\s*", "", text)
+    sem_cerca = re.sub(r"\s*```\s*$", "", sem_cerca).strip()
+    if sem_cerca != text:
         try:
-            return json.loads(fence_match.group(1))
+            return json.loads(sem_cerca)
         except json.JSONDecodeError:
             pass
 
-    # 3. Último recurso: do primeiro "{" ao último "}" no texto inteiro
+    # 3. Contagem de chaves balanceada, a partir do primeiro "{" —
+    # funciona com qualquer nível de aninhamento, e ignora "{"/"}" que
+    # apareçam DENTRO de strings (texto livre), não só de objetos.
+    for candidato in (sem_cerca, text):
+        inicio = candidato.find("{")
+        if inicio == -1:
+            continue
+        profundidade = 0
+        dentro_de_string = False
+        escapando = False
+        for i in range(inicio, len(candidato)):
+            ch = candidato[i]
+            if escapando:
+                escapando = False
+                continue
+            if ch == "\\":
+                escapando = True
+                continue
+            if ch == '"':
+                dentro_de_string = not dentro_de_string
+                continue
+            if dentro_de_string:
+                continue
+            if ch == "{":
+                profundidade += 1
+            elif ch == "}":
+                profundidade -= 1
+                if profundidade == 0:
+                    try:
+                        return json.loads(candidato[inicio:i + 1])
+                    except json.JSONDecodeError:
+                        break  # tenta o próximo candidato, se houver
+
+    # 4. Último recurso: do primeiro "{" ao último "}" no texto inteiro
+    # (mantido como rede de segurança final — mais frágil que o passo 3,
+    # mas cobre casos exóticos que a contagem balanceada não previu).
     first, last = text.find("{"), text.rfind("}")
     if first != -1 and last != -1 and last > first:
         try:
@@ -1098,6 +1188,43 @@ def main():
                 "Série crua não incluída — EBITDA e anomalias já calculados por código "
                 "(ver ebitda_calculado / anomalias_detectadas / contas_novas_ou_zeradas)."
             )
+
+        # `dre_estruturada` (dict bruto {categoria: {mes_NN: valor}},
+        # sem hierarquia nem agregação) sai do contexto — é redundante
+        # com `ebitda_calculado`/`anomalias_detectadas` (já calculados
+        # acima) e é o formato mais verboso dos três.
+        if raw.get("dre_estruturada"):
+            raw.pop("dre_estruturada", None)
+            raw["dre_estruturada_nota"] = (
+                "DRE bruta linha-a-linha não incluída aqui — já resumida acima em "
+                "ebitda_calculado/anomalias_detectadas. Ver mini_dre/tabela_viabilidade_financeira "
+                "pra números por período (agrupados por trimestre quando há muitos)."
+            )
+
+        # `mini_dre`/`tabela_viabilidade_financeira`: AGRUPADOS (não
+        # removidos) quando há muitos períodos — achado real em 26/08
+        # (deal "Nacional", 12 meses de DRE, Ponto 1 do Thiago: "reduzir
+        # tempo e consumo"). Corrigindo uma primeira tentativa errada:
+        # cheguei a remover os dois campos por completo daqui, assumindo
+        # que o agente já via os mesmos números via `format_dre_table`
+        # — só que esse texto (`combined_text`) só é visto pelo agente
+        # `extraction`, nunca por `opinion`/`financial_analysis`/
+        # `cfo_synthesis` (que são os únicos que passam por este trecho,
+        # `AGENTS_NEED_RAW_SERIES`). Remover sem dar nada em troca teria
+        # deixado esses 3 agentes cegos aos números detalhados da DRE —
+        # pior que o problema original. Agrupar (mesma lógica já testada
+        # no PPT) reduz o volume sem cegar ninguém.
+        for campo in ("mini_dre", "tabela_viabilidade_financeira"):
+            estrutura = raw.get(campo)
+            if estrutura:
+                # Reconstrói em cópias novas — nunca muta `dados` no lugar
+                # (é o mesmo objeto referenciado em `deal_data`, que este
+                # código só deveria LER, não alterar).
+                raw[campo] = {
+                    arquivo: {**dados, "linhas": agregar_linhas_por_trimestre(dados["linhas"])} if dados.get("linhas") else dados
+                    for arquivo, dados in estrutura.items()
+                }
+
         agent_input["raw_extracted"] = raw
 
     # CFO Synthesis precisa ver o que os outros 5 agentes concluíram pra
