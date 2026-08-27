@@ -360,6 +360,33 @@ def excel_to_text(file_bytes: bytes, filename: str) -> tuple[str, list, dict, di
     dre_linhas: dict = {}
     dre_hierarquia_info: dict | None = None
     dre_deteccao = detect_dre_sheet(wb)
+    multi_entidade_ambigua_nota = None
+    if dre_deteccao and dre_deteccao.get("multi_entidade_ambigua"):
+        # Achado real em 27/08 (deal Irko): a aba tem 2+ blocos de
+        # empresa empilhados (holding), mas nenhum bloco "combinado"/
+        # "consolidado" claro pra escolher sozinho. Adivinhar aqui é
+        # exatamente o bug que gerou o resultado errado do Irko (pegar
+        # uma subsidiária como se fosse o grupo todo) — então NÃO
+        # tenta extração fina nem hierarquia neste arquivo. Trata como
+        # "sem DRE reconhecível" (dre_deteccao vira None daqui pra
+        # frente) e deixa uma nota explícita, que vira red flag visível
+        # pro Thiago/parceiro resolver manualmente, em vez de um número
+        # errado sem aviso nenhum.
+        multi_entidade_ambigua_nota = (
+            f"Aba '{dre_deteccao['aba']}' tem {len(dre_deteccao['blocos_detectados'])} blocos de "
+            f"empresa/entidade ({', '.join(dre_deteccao['blocos_detectados'])}), mas nenhum bloco "
+            "claramente 'combinado'/'consolidado' foi identificado — extração financeira NÃO "
+            "prosseguiu neste arquivo pra evitar pegar uma subsidiária isolada como se fosse o "
+            "total. Confirmar com o parceiro qual bloco (ou soma) representa o deal, ou renomear "
+            "o bloco correto pra incluir 'combinado'/'consolidado'/'total grupo' no rótulo."
+        )
+        parts.append(
+            f"===== AVISO: MÚLTIPLAS EMPRESAS DETECTADAS NA ABA '{dre_deteccao['aba']}' =====\n"
+            + multi_entidade_ambigua_nota
+        )
+        dre_hierarquia_info = {"multi_entidade_ambigua": True, "nota": multi_entidade_ambigua_nota,
+                                "blocos_detectados": dre_deteccao["blocos_detectados"]}
+        dre_deteccao = None
     if dre_deteccao:
         dre_linhas = parse_dre_sheet(wb, dre_deteccao)
         skip_sheets.add(dre_deteccao["aba"])
@@ -1143,6 +1170,25 @@ def main():
             raw["ebitda_calculado"] = calcular_ebitda_de_dre(primeira_dre)
             raw["anomalias_detectadas"] = detectar_anomalias_run_rate(
                 dre_linhas_para_contas(primeira_dre), top_n=10
+            )
+        elif dre_hierarquia_aproximada and next(iter(dre_hierarquia_aproximada.values()), {}).get("multi_entidade_ambigua"):
+            # Achado real em 27/08 (deal Irko) — aba com múltiplos blocos
+            # de empresa (holding) e NENHUM bloco "combinado"/"consolidado"
+            # claro pra escolher sozinho (ver `_aplicar_deteccao_multi_empresa`
+            # em dre_balancete_parser.py). Não calcula NADA aqui — sem
+            # isso, cairia no mesmo bug que gerou o resultado errado do
+            # Irko (pegar uma subsidiária isolada como se fosse o total).
+            # `ebitda_calculado=None` explícito é preferível a um número
+            # plausível mas errado: força o `financial_analysis`/
+            # `cfo_synthesis` a tratar isso como bloqueio, não como dado.
+            primeiro_arquivo = next(iter(dre_hierarquia_aproximada.values()))
+            raw["ebitda_calculado"] = None
+            raw["anomalias_detectadas"] = []
+            raw.pop("dre_hierarquia_aproximada", None)
+            raw["dre_hierarquia_nota"] = (
+                "BLOQUEADO: " + primeiro_arquivo["nota"] +
+                " Nenhum EBITDA/margem foi calculado a partir desta DRE — "
+                "trate como dado ausente, não como zero ou não-material."
             )
         elif dre_hierarquia_aproximada:
             # Fallback (25/08) — a DRE existe e foi lida, mas a nomenclatura
