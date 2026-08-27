@@ -331,9 +331,22 @@ def parse_consolidated_balancete(wb, deteccao: dict, max_data_rows: int = 5000) 
 # estável a cada linha, já que o texto exato varia (ex.: "Receitas
 # Serviços" vs "Receita de Serviços" vs "Faturamento Serviços").
 DRE_CATEGORIAS = [
+    # ORDEM IMPORTA (bug real corrigido em 27/08, achado testando o deal
+    # Irko/Grupo Irko Combinado): "receita.*(serv|venda|faturamento)" bate
+    # em "Receita Bruta de Serviços" E TAMBÉM em "Receita Líquida de
+    # Serviços" (as duas têm "receita" seguido de "serv"). Como
+    # `categorizar_linha_dre` para no primeiro match e `parse_dre_sheet`
+    # grava `linhas[chave] = valores` sem checar se a chave já existia,
+    # a linha de Receita Líquida (que vem DEPOIS da Bruta em toda DRE no
+    # formato "Resultado das Operações de Serviços") sobrescrevia
+    # silenciosamente o valor de Receita Bruta com o valor líquido — sem
+    # erro, sem aviso, só um número errado usado como se fosse bruto daí
+    # pra frente (margem bruta calculada sobre uma base já líquida sai
+    # inflada). Checar "líquida" PRIMEIRO resolve: "Receita Líquida..."
+    # nunca chega a ser testada contra o regex de bruta.
+    (re.compile(r"(?i)receita.*l[ií]quida"), "receita_liquida"),
     (re.compile(r"(?i)receita.*(serv|venda|faturamento)"), "receita_bruta"),
     (re.compile(r"(?i)impostos?\s*s[/.]?\s*(venda|serviço|faturamento)"), "impostos_sobre_receita"),
-    (re.compile(r"(?i)receita.*l[ií]quida"), "receita_liquida"),
     (re.compile(r"(?i)^cmv$|custo.*(servi|mercadoria|venda)"), "cmv"),
     (re.compile(r"(?i)total.*despesas?\s*operacionais?"), "despesas_operacionais_total"),
     (re.compile(r"(?i)deprecia[çc][ãa]o|amortiza[çc][ãa]o"), "d_a"),
@@ -371,6 +384,154 @@ def _inferir_coluna_rotulo(ws, header_row: int, meses_col: dict, max_scan_rows: 
     if not any(contagem_texto):
         return None
     return contagem_texto.index(max(contagem_texto))
+
+
+# ===========================================================================
+# DETECÇÃO DE MÚLTIPLAS EMPRESAS NA MESMA ABA (achado real em 27/08, deal
+# "Irko" — arquivo "Grupo Irko Análise.xlsx")
+# ===========================================================================
+#
+# Todo o resto deste módulo assume "uma DRE por aba" — premissa válida nos
+# 4 deals reais testados até aqui (BPO Innova, CSF Hotelaria, Plannea,
+# Nacional), mas FALSA para uma holding: a aba "Grupo" do arquivo Irko tem
+# 8 empresas operacionais + 1 bloco "GRUPO IRKO COMBINADO" (a soma das 8),
+# cada uma com seu próprio Balanço + DRE, empilhados na mesma aba, uma
+# embaixo da outra, todas com os MESMOS rótulos de linha ("Receita Bruta de
+# Serviços" aparece 9 vezes) e as MESMAS colunas de período (2019..2025
+# repetido 9 vezes).
+#
+# Duas coisas quebravam nesse caso, e as duas são estruturais, não de
+# regex de nomenclatura:
+#
+# 1. `extrair_hierarquia_dre`/`parse_dre_sheet` tinham (e continuam tendo,
+#    como default pra manter compatibilidade com os 4 deals de DRE única)
+#    `max_data_rows=300` — a partir do cabeçalho da PRIMEIRA empresa da
+#    aba. No arquivo Irko o bloco certo (Grupo Irko Combinado) começa na
+#    linha 483 — MUITO além do corte de 300. Simplesmente aumentar esse
+#    número não resolve sozinho (ver item 2).
+# 2. Mesmo sem o corte de 300 linhas, `_classificar_raizes` guarda as
+#    raízes num dict KEADO PELO TEXTO DO RÓTULO (`raizes_classificadas[r["rotulo"]] = ...`,
+#    modo indentação) — se a varredura passasse por MAIS de um bloco de
+#    empresa, a segunda ocorrência de "Receita Bruta de Serviços" SOBRESCREVE
+#    a primeira (não soma, não avisa). É por isso que o resultado saiu com
+#    os números da IRKO HIRASHIMA (a 5ª empresa) e não de nenhuma outra: era
+#    literalmente o último bloco completo lido antes do corte de 300 linhas
+#    sobrescrever tudo que veio antes dele. No modo "colunas separadas" o
+#    comportamento é o oposto e igualmente perigoso: os valores são SOMADOS
+#    por período (linha 942-943) — se a janela de varredura incluir o bloco
+#    "Grupo Irko Combinado" (que já É a soma das 8) JUNTO com uma ou mais
+#    empresas individuais, o resultado soma tudo de novo, duplicando os
+#    números certos.
+#
+# A correção não é "ler mais linhas" — é reconhecer que a aba tem múltiplos
+# blocos de empresa, achar as fronteiras de cada um, e restringir a
+# varredura ao bloco certo. `detect_company_blocks` faz a primeira parte;
+# `detect_dre_sheet` usa o resultado pra escolher o bloco (o "combinado",
+# quando existir) e apertar a janela via `linha_fim_bloco`, que
+# `extrair_hierarquia_dre`/`parse_dre_sheet` respeitam (ver os dois logo
+# abaixo) SEM MUDAR o comportamento default de nenhum arquivo de DRE única
+# — o campo só existe quando `detect_company_blocks` acha 2+ blocos.
+
+_RE_BLOCO_BALANCO = re.compile(r"(?i)BALAN[ÇC]O\s+PATRIMONIAL")
+_RE_BLOCO_DRE_TITULO = re.compile(r"(?i)DEMONSTRA[ÇC][ÃA]O\s+DO\s+RESULTADO")
+_RE_BLOCO_COMBINADO = re.compile(r"(?i)\b(combinad[oa]|consolidad[oa]|total\s+grupo)\b")
+# Seções extras depois do DRE de um bloco (achado real 27/08, arquivo
+# Irko: "GRUPO IRKO COMBINADO | AJUSTES" logo depois do DRE do bloco
+# combinado, com um segundo "LUCRO LÍQUIDO" — já ajustado por custos
+# diferidos capitalizados). Não é Balanço nem DRE novo (não conta como
+# empresa nova pro gatilho de "multi-empresa"), mas TEM que fechar a
+# janela do bloco anterior — senão o rótulo "LUCRO LÍQUIDO" duplicado
+# (pré e pós-ajuste) colide na mesma chave e o pós-ajuste (que vem
+# depois na planilha) sobrescreve o valor real da DRE silenciosamente.
+_RE_BLOCO_OUTRA_SECAO = re.compile(r"(?i)\bAJUSTES?\b")
+
+
+def detect_company_blocks(ws, max_scan_rows: int = 3000) -> list[dict]:
+    """Acha blocos de empresa numa aba que empilha Balanço+DRE de várias
+    empresas uma embaixo da outra (caso real: holding com N subsidiárias).
+
+    Sinal usado: cada bloco real observado (arquivo Irko, 9 blocos: 8
+    empresas + 1 combinado) tem uma linha com "BALANÇO PATRIMONIAL" e,
+    mais abaixo, uma linha com "DEMONSTRAÇÃO DO RESULTADO" — as DUAS na
+    MESMA LINHA que o nome da empresa (colunas diferentes, mesma linha).
+    Não depende de nomenclatura de conta nenhuma, só desses dois títulos
+    de seção, que são convenção de relatório contábil bem mais estável
+    entre arquivos diferentes do que os rótulos de linha da DRE em si.
+
+    Retorna lista de {"nome", "linha_balanco", "linha_dre_titulo",
+    "linha_fim"} em ordem de aparição na planilha. `linha_fim` é a linha
+    anterior ao início do PRÓXIMO bloco (ou None no último bloco — quem
+    usa decide o teto, normalmente "até o fim da aba").
+
+    Retorna lista vazia (não None) quando não acha nenhum bloco — é o
+    caso normal de toda DRE única já testada; quem chama trata "menos de
+    2 blocos" como "não é multi-empresa", sem mudar nada do comportamento
+    de hoje."""
+    anchors = []  # (linha, tipo, nome) — tipo em {"balanco", "dre", "outra_secao"}
+    for i, row in enumerate(ws.iter_rows(min_row=1, max_row=max_scan_rows, values_only=True), start=1):
+        textos = [(j, str(v).strip()) for j, v in enumerate(row) if isinstance(v, str) and v.strip()]
+        if not textos:
+            continue
+        for j, texto in textos:
+            eh_balanco = bool(_RE_BLOCO_BALANCO.search(texto))
+            eh_dre = bool(_RE_BLOCO_DRE_TITULO.search(texto))
+            eh_outra = bool(_RE_BLOCO_OUTRA_SECAO.search(texto))
+            if not (eh_balanco or eh_dre or eh_outra):
+                continue
+            # Nome da empresa: outra célula de texto na MESMA linha, antes
+            # da coluna do título de seção (padrão observado: nome na
+            # coluna B, título na C ou D). Se não achar, usa a maior célula
+            # de texto da linha que não seja o próprio título.
+            candidatos_nome = [t for (jj, t) in textos if jj != j and jj < j]
+            if not candidatos_nome:
+                candidatos_nome = [t for (jj, t) in textos if jj != j]
+            nome = max(candidatos_nome, key=len) if candidatos_nome else None
+            if nome:
+                tipo = "balanco" if eh_balanco else ("dre" if eh_dre else "outra_secao")
+                anchors.append((i, tipo, nome.strip()))
+            break  # 1 âncora por linha basta
+
+    if len([a for a in anchors if a[1] in ("balanco", "dre")]) < 2:
+        return []
+
+    blocos = []
+    atual = None
+    for linha, tipo, nome in anchors:
+        if tipo == "balanco":
+            if atual is not None:
+                blocos.append(atual)
+            atual = {"nome": nome, "linha_balanco": linha, "linha_dre_titulo": None, "linha_fim": None}
+        elif tipo == "dre" and atual is not None:
+            # Confirma que é o DRE do MESMO bloco (nome bate) — se não
+            # bater, ainda assim aceita (planilhas reais variam pequenas
+            # diferenças de grafia entre o título do Balanço e da DRE do
+            # mesmo bloco — ex.: espaços extras), só não força descartar.
+            atual["linha_dre_titulo"] = linha
+    if atual is not None:
+        blocos.append(atual)
+
+    # Só conta como bloco de verdade quem tem os DOIS títulos (Balanço E
+    # DRE) — uma âncora solta (ex.: aba só de Balanço) não é um "bloco de
+    # empresa" completo pros fins desta função.
+    blocos = [b for b in blocos if b["linha_dre_titulo"] is not None]
+
+    # Fim de cada bloco: a PRÓXIMA âncora de QUALQUER tipo (inclusive
+    # "outra_secao", ex.: "AJUSTES") que vier depois do início deste
+    # bloco — não só o balanço do próximo bloco de empresa. Sem isso, uma
+    # seção extra depois do último bloco (ex.: Ajustes do Grupo
+    # Combinado) fica dentro da janela "sem fim" do último bloco e pode
+    # colidir rótulo com ele (achado real 27/08: "LUCRO LÍQUIDO" pré e
+    # pós-ajuste, mesma chave, o pós-ajuste sobrescrevendo o real).
+    todas_as_linhas_de_inicio = sorted(a[0] for a in anchors)
+    for b in blocos:
+        # Estritamente depois do título de DRE DESTE bloco — não do
+        # balanço dele (senão a primeira "próxima âncora" encontrada
+        # seria o próprio título de DRE do bloco, cortando a janela
+        # antes dela mesma começar a ter dado).
+        proximas = [ln for ln in todas_as_linhas_de_inicio if ln > b["linha_dre_titulo"]]
+        b["linha_fim"] = (proximas[0] - 1) if proximas else None
+
+    return blocos
 
 
 def detect_dre_sheet(wb, min_linhas: int = 3, max_linhas: int = 400):
@@ -449,6 +610,7 @@ def detect_dre_sheet(wb, min_linhas: int = 3, max_linhas: int = 400):
     if len(candidatas) == 1:
         melhor = candidatas[0]
         del melhor["linhas_validas"]
+        _aplicar_deteccao_multi_empresa(wb, melhor)
         return melhor
 
     def _qualidade(c):
@@ -460,7 +622,49 @@ def detect_dre_sheet(wb, min_linhas: int = 3, max_linhas: int = 400):
     candidatas.sort(key=lambda c: _qualidade(c), reverse=True)
     melhor = candidatas[0]
     del melhor["linhas_validas"]
+    _aplicar_deteccao_multi_empresa(wb, melhor)
     return melhor
+
+
+def _aplicar_deteccao_multi_empresa(wb, deteccao: dict) -> None:
+    """Achado real em 27/08 (deal Irko — holding com 8 subsidiárias + 1
+    bloco combinado na mesma aba). Roda SEMPRE, mesmo quando só havia 1
+    aba candidata (bug real: o caso de 1 candidata pula o `sort`/loop de
+    qualidade acima, e era exatamente o caminho que o arquivo Irko seguia
+    — teria ficado sem essa checagem se eu só tivesse colado aqui embaixo).
+
+    Muta `deteccao` no lugar, adicionando (só quando aplicável):
+    - `multi_entidade`: True se achou 2+ blocos de empresa na aba.
+    - `entidade_selecionada` / `linha_fim_bloco`: quando um bloco
+      "combinado"/"consolidado" foi identificado — aperta a janela de
+      varredura pra ele (linha_cabecalho já aponta pro balanço desse
+      bloco).
+    - `multi_entidade_ambigua`: True quando há múltiplos blocos mas
+      NENHUM claramente combinado — nesse caso NÃO escolhe um bloco
+      qualquer (arriscaria repetir o bug de pegar uma subsidiária como se
+      fosse o grupo todo); quem consome isso (`run_agent.py`) deve tratar
+      como "não confiável" e sinalizar, não silenciar."""
+    blocos = detect_company_blocks(wb[deteccao["aba"]])
+    if len(blocos) < 2:
+        deteccao["multi_entidade"] = False
+        return
+
+    deteccao["multi_entidade"] = True
+    deteccao["blocos_detectados"] = [b["nome"] for b in blocos]
+    combinados = [b for b in blocos if _RE_BLOCO_COMBINADO.search(b["nome"])]
+    if len(combinados) == 1:
+        bloco = combinados[0]
+        deteccao["entidade_selecionada"] = bloco["nome"]
+        deteccao["linha_cabecalho"] = bloco["linha_balanco"]
+        deteccao["linha_fim_bloco"] = bloco["linha_fim"]
+    else:
+        # 0 ou 2+ blocos "combinado" — ambíguo demais pra escolher sozinho
+        # (2+ seria ainda mais raro/estranho que 0, mas trata igual: não
+        # adivinha). `linha_cabecalho` continua apontando pro primeiro
+        # bloco da aba (comportamento herdado, não usado se quem chama
+        # respeitar a flag abaixo e recusar a extração fina).
+        deteccao["entidade_selecionada"] = None
+        deteccao["multi_entidade_ambigua"] = True
 
 
 def calcular_ebitda_de_dre(dre_estruturada: dict) -> dict:
@@ -547,6 +751,14 @@ def parse_dre_sheet(wb, deteccao: dict, max_data_rows: int = 300) -> dict:
     col_rotulo = deteccao["col_rotulo"]
     meses_col = deteccao["meses_para_coluna"]
     header_row = deteccao["linha_cabecalho"]
+    # Aba multi-empresa (achado real 27/08, deal Irko): aperta a janela
+    # pro bloco selecionado por `_aplicar_deteccao_multi_empresa`, senão
+    # linhas de OUTRA empresa (mesmos rótulos, "Receita Bruta de
+    # Serviços" etc.) entram na mesma varredura e sobrescrevem o bloco
+    # certo em `linhas[chave]`, silenciosamente. Sem efeito em arquivo de
+    # DRE única (`linha_fim_bloco` não existe nesse caso).
+    if deteccao.get("linha_fim_bloco"):
+        max_data_rows = min(max_data_rows, deteccao["linha_fim_bloco"] - header_row)
 
     linhas = {}
     for row in ws.iter_rows(min_row=header_row + 1, max_row=header_row + max_data_rows, values_only=True):
@@ -774,6 +986,15 @@ def extrair_hierarquia_dre(wb, deteccao: dict, max_data_rows: int = 300) -> dict
     col_rotulo = deteccao["col_rotulo"]
     meses_col = deteccao["meses_para_coluna"]
     header_row = deteccao["linha_cabecalho"]
+    # Mesma proteção de janela que `parse_dre_sheet` — ver comentário lá.
+    # Crítico aqui em particular: no modo "colunas separadas", valores de
+    # blocos diferentes são SOMADOS (não sobrescritos) por período — sem
+    # apertar a janela, uma DRE de holding com bloco "combinado" (já a
+    # soma das subsidiárias) somaria ele de novo com as subsidiárias
+    # individuais, duplicando os números certos ao invés de só pegar o
+    # bloco errado.
+    if deteccao.get("linha_fim_bloco"):
+        max_data_rows = min(max_data_rows, deteccao["linha_fim_bloco"] - header_row)
 
     colunas_hier = _detectar_colunas_hierarquia(ws, header_row, meses_col, col_rotulo, max_data_rows)
 
@@ -1088,7 +1309,16 @@ def calcular_resultado_de_hierarquia(hierarquia: dict) -> dict:
     }
 
 
-_RE_MB_RECEITA_BRUTA = re.compile(r"(?i)^\W*receitas?\W*$|receita.*(bruta|serv|venda|faturamento)")
+_RE_MB_RECEITA_BRUTA = re.compile(r"(?i)^\W*receitas?\W*$|receita(?!.*l[íi]quida).*(bruta|serv|venda|faturamento)")
+# Defesa extra (27/08, mesmo achado do fix em DRE_CATEGORIAS acima):
+# sem o "(?!.*l[íi]quida)", esta regex também bate "Receita Líquida de
+# Serviços". Hoje `_achar_linha_por_padrao` pega candidatos[0] (primeira
+# ocorrência na ordem de leitura), o que por sorte de convenção — Bruta
+# sempre vem antes de Líquida numa DRE — não estava causando erro visível
+# neste ponto específico. Mas depender de ordem de linha na planilha pra
+# não confundir Bruta com Líquida é frágil (uma DRE que liste as linhas
+# em outra ordem quebraria isso silenciosamente); a exclusão explícita
+# remove essa dependência.
 _RE_MB_RECEITA_LIQUIDA = re.compile(r"(?i)receita.*l[íi]quida")
 _RE_MB_DESPESA_PESSOAL = re.compile(r"(?i)despesa.*pessoal|folha[\s_]*de[\s_]*pagamento|custo.*folha|\bfolha\b|\brh\b")
 _RE_MB_CUSTO_SISTEMAS = re.compile(r"(?i)custo.*sistemas?(?!.*financeiro)|servi[çc]os?[\s_]*de[\s_]*sistema|\bsistemas?\b(?!.*financeiro)")
