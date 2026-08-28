@@ -836,6 +836,65 @@ $("detail-close").addEventListener("click", () => {
 // =======================================================================
 // PÁGINA: AGENTES (admin)
 // =======================================================================
+// =======================================================================
+// REGRAS DE CÓDIGO (não são prompt de IA) — achado real em 28/08: o
+// Thiago clicava em `complexity`/`integration_risks`/`operational_risks`/
+// `viabilidade_financeira` na página "Agentes" e via só "(sem prompt
+// gravado)", tecnicamente certo mas inútil — esses 4 são 100% Python
+// (`scripts/regras_negocio.py` e `scripts/complexity_rules.py`), sem
+// nenhuma chamada de IA. Resumo FIEL ao código real (limiares copiados
+// direto das funções, não reinterpretados) — quem quiser o texto exato
+// vai no arquivo/função citados. Isso é só EXIBIÇÃO — não editável aqui,
+// porque editar de verdade significa mudar o `.py` no repositório, não
+// uma linha de banco.
+const CODE_AGENT_RULES = {
+  complexity: {
+    arquivo: "scripts/complexity_rules.py", funcao: "classificar_complexidade",
+    resumo: [
+      "Localização fora da Grande SP → Alta.",
+      "Sistema de ERP contábil diferente do Domínio → Alta.",
+      "Sistema hospedado em servidor físico (não nuvem/web) → Média.",
+      "Sistema financeiro diferente do Omie → Média.",
+      "Razão clientes/colaboradores < 15 → Alta; entre 15 e 20 → Média.",
+      "Concentração de receita nos top 10 clientes > 35% → Alta; > 25% → Média.",
+      "Top 10 clientes incluem segmento sensível (indústria/associação/hospital/instituição de ensino) → Média.",
+      "Nível final = o mais alto entre os critérios acionados; sem nenhum dado avaliável → \"Dados insuficientes\".",
+    ],
+  },
+  integration_risks: {
+    arquivo: "scripts/regras_negocio.py", funcao: "avaliar_riscos_integracao",
+    resumo: [
+      "Reaproveita 2 critérios já calculados no Bloco B — não recalcula nada novo.",
+      "Cliente usa sistema financeiro fora de Omie/Conta Azul → risco de migração citado.",
+      "Outsourcing de sistemas ou de pessoas > 15% → nível \"Alto\"; entre 0% e 15% → \"Médio\".",
+      "Sem nenhum outsourcing e sistema financeiro reconhecido → \"Baixo\".",
+      "Checklist de due diligence do prompt original (benefícios fiscais, cláusulas de mudança de controle etc.) foi removido do schema por decisão do Thiago em 25/08 — não está mais aqui.",
+    ],
+  },
+  operational_risks: {
+    arquivo: "scripts/regras_negocio.py", funcao: "avaliar_riscos_operacionais",
+    resumo: [
+      "Concentração de receita nos 10 maiores clientes > 35% → \"Crítico\"; > 25% → \"Médio\".",
+      "Razão clientes/colaboradores < 15 → sinaliza risco de pessoa-chave (headcount baixo pro volume de carteira).",
+      "Inadimplência média > 7% → risco crítico citado.",
+      "Opera em sistema do cliente além de Omie/Conta Azul → risco operacional contínuo (não só de migração).",
+      "\"Bloqueios judiciais/fiscais/bancários\" sempre aparece como não avaliado — não existe pergunta sobre isso no formulário hoje (gap de dado assumido, não escondido).",
+    ],
+  },
+  viabilidade_financeira: {
+    arquivo: "scripts/regras_negocio.py", funcao: "avaliar_viabilidade_financeira",
+    resumo: [
+      "Margem bruta > 40% → Verde; < 25% → Vermelho.",
+      "Custo de folha sobre faturamento < 45% → Verde; > 60% → Vermelho.",
+      "Inadimplência média < 3% → Verde; > 7% → Vermelho.",
+      "Churn médio < 1,5% → Verde; > 3% → Vermelho.",
+      "Qualquer critério Vermelho → \"Não Recomendado\", independente dos outros.",
+      "Perfil restrito presente (sem Vermelho) → \"Fit com Ressalvas (revisar manualmente)\".",
+      "Algum Amarelo sem Vermelho → \"Fit com Ressalvas\". Tudo Verde → \"Fit Estratégico\".",
+    ],
+  },
+};
+
 async function renderAgentsPage() {
   const content = $("content");
   content.innerHTML = `
@@ -863,6 +922,31 @@ async function renderAgentsPage() {
 async function loadAgentEditor(agent) {
   const editor = $("agent-editor");
   editor.innerHTML = "<p>Carregando...</p>";
+
+  // Achado real em 28/08: `complexity`/`integration_risks`/
+  // `operational_risks`/`viabilidade_financeira` não têm prompt — são
+  // 100% Python. Mostrar "(sem prompt gravado)" ali é tecnicamente
+  // verdade e completamente inútil. Painel diferente, só leitura.
+  const regrasCodigo = CODE_AGENT_RULES[agent.name];
+  if (regrasCodigo) {
+    editor.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div><strong>${escapeHtml(agent.name)}</strong> <span class="version-pill">100% código</span></div>
+      </div>
+      <div class="callout" style="margin-bottom:14px">
+        Este agente não usa IA — é regra determinística em
+        <code>${escapeHtml(regrasCodigo.arquivo)}</code>, função
+        <code>${escapeHtml(regrasCodigo.funcao)}</code>. Pra mudar o
+        comportamento de verdade, precisa editar o código no repositório
+        (GitHub), não dá pra editar aqui — esta tela é só leitura, um
+        resumo fiel do que a função faz.
+      </div>
+      <ul style="line-height:1.9">
+        ${regrasCodigo.resumo.map(r => `<li>${escapeHtml(r)}</li>`).join("")}
+      </ul>
+    `;
+    return;
+  }
 
   const { data: versions } = await sb.from("agent_versions").select("*").eq("agent_id", agent.id).order("created_at", { ascending: false });
   const activeVersion = versions.find(v => v.active) || versions[0];
