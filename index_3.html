@@ -1,0 +1,1110 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>M&amp;A Analysis Engine</title>
+<link href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+:root{
+  --navy:#0F1727; --navy-soft:#1c2942;
+  --coral:#F25461; --coral-strong:#C73B47; --coral-soft:#FDEAEC;
+  --success:#2E7D4F; --success-soft:#E6F2EB;
+  --warn:#B6592A; --warn-soft:#FBEFE5;
+  --danger:#B03A3A; --danger-soft:#FBECEC;
+  --bg:#F9F9F9; --border:#E8E8E6; --text:#141414; --muted:#6A6A68;
+  --sans:"Lato",-apple-system,sans-serif; --mono:"JetBrains Mono",monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:var(--sans);background:var(--bg);color:var(--text);font-size:15px}
+.hidden{display:none !important}
+button{font-family:var(--sans);cursor:pointer;border:none;border-radius:8px;font-weight:700;padding:10px 18px;font-size:14px}
+button.primary{background:var(--navy);color:#fff}
+button.primary:hover{background:var(--navy-soft)}
+button.danger{background:var(--danger);color:#fff}
+button.danger:hover{background:#8f2e2e}
+button.ghost{background:transparent;color:var(--navy);border:1px solid var(--border)}
+button.ghost:hover{border-color:#c8c8c6}
+button:disabled{opacity:0.5;cursor:not-allowed}
+button.icon-btn{background:transparent;color:var(--muted);padding:6px 8px;font-size:13px}
+button.icon-btn:hover{color:var(--danger)}
+input,select,textarea{font-family:var(--sans);font-size:14px;padding:9px 12px;border:1px solid var(--border);border-radius:8px;width:100%}
+textarea{font-family:var(--mono);font-size:13px;line-height:1.6}
+label{font-size:12.5px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;display:block;margin-bottom:5px}
+
+/* ---- Login ---- */
+#login-screen{min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg)}
+.login-card{background:#fff;border:1px solid var(--border);border-radius:16px;padding:40px;width:360px}
+.login-card h1{font-size:22px;margin:0 0 4px}
+.login-card p{color:var(--muted);font-size:13.5px;margin:0 0 24px}
+.field{margin-bottom:14px}
+.error-msg{color:var(--danger);font-size:13px;margin-top:10px}
+
+/* ---- App shell: sidebar + content ---- */
+#app-screen{display:flex;min-height:100vh}
+.sidebar{width:240px;flex-shrink:0;background:var(--navy);color:rgba(255,255,255,.85);display:flex;flex-direction:column;padding:24px 16px;position:sticky;top:0;height:100vh}
+.sidebar .brand{font-size:17px;font-weight:900;color:#fff;padding:0 8px 20px;border-bottom:1px solid rgba(255,255,255,.1);margin-bottom:16px}
+.sidebar .brand .dot{color:var(--coral)}
+.nav-section-label{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:rgba(255,255,255,.4);font-weight:700;padding:0 8px;margin:16px 0 6px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:8px;font-size:14px;color:rgba(255,255,255,.8);cursor:pointer;margin-bottom:2px;position:relative}
+.nav-item:hover{background:rgba(255,255,255,.06);color:#fff}
+.nav-item.active{background:rgba(242,84,97,.18);color:var(--coral);font-weight:700}
+.sidebar-footer{margin-top:auto;padding-top:16px;border-top:1px solid rgba(255,255,255,.1);font-size:12.5px}
+.sidebar-footer .email{color:rgba(255,255,255,.75);word-break:break-all;margin-bottom:4px}
+.role-badge{display:inline-block;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;padding:2px 7px;border-radius:999px;margin-bottom:10px}
+.role-badge.admin{background:var(--coral-soft);color:var(--coral-strong)}
+.role-badge.analyst{background:rgba(255,255,255,.1);color:rgba(255,255,255,.7)}
+
+.content{flex:1;padding:36px 40px;max-width:1200px}
+.page-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px}
+.page-header h1{font-size:24px;margin:0 0 4px;color:var(--navy)}
+.page-header p{color:var(--muted);font-size:13.5px;margin:0}
+.toolbar-actions{display:flex;gap:10px}
+
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden;border:1px solid var(--border)}
+th{text-align:left;font-size:11px;text-transform:uppercase;color:var(--muted);padding:10px 14px;border-bottom:1px solid var(--border);background:#FAFAF9}
+td{padding:12px 14px;border-bottom:1px solid var(--border);font-size:14px;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr.deal-row{cursor:pointer}
+tr.deal-row:hover{background:#FAFAF9}
+.row-actions{display:flex;gap:6px;justify-content:flex-end}
+
+.badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:11.5px;font-weight:700}
+.badge.uploaded{background:#EFEFED;color:var(--muted)}
+.badge.processing{background:var(--warn-soft);color:var(--warn)}
+.badge.completed{background:var(--success-soft);color:var(--success)}
+.badge.error{background:var(--danger-soft);color:var(--danger)}
+.badge.GO{background:var(--success-soft);color:var(--success)}
+.badge.NO-GO{background:var(--danger-soft);color:var(--danger)}
+.badge.CONDITIONAL_GO{background:var(--warn-soft);color:var(--warn)}
+
+.modal-backdrop{position:fixed;inset:0;background:rgba(15,23,39,0.5);display:flex;align-items:center;justify-content:center;z-index:50;padding:20px}
+.modal{background:#fff;border-radius:16px;padding:28px;width:100%;max-width:640px;max-height:85vh;overflow-y:auto}
+.modal.wide{max-width:820px}
+.modal h2{margin:0 0 4px;font-size:19px}
+.modal .sub{color:var(--muted);font-size:13px;margin:0 0 20px}
+.modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}
+.file-list{font-size:13px;color:var(--muted);margin-top:8px}
+
+.detail-section{margin-bottom:22px}
+.detail-section h3{font-size:13px;text-transform:uppercase;color:var(--muted);letter-spacing:.03em;margin:0 0 8px}
+.detail-section p{font-size:14px;line-height:1.6;margin:0 0 8px}
+.detail-section ul{margin:0;padding-left:18px;font-size:14px;line-height:1.7}
+.callout{background:#FAFAF9;border:1px solid var(--border);border-radius:10px;padding:14px 16px;font-size:13.5px;color:var(--muted)}
+.callout.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
+.callout.danger{background:var(--danger-soft);color:var(--danger);border-color:transparent}
+.download-link{display:inline-block;margin-right:16px;color:var(--coral-strong);font-weight:700;font-size:13.5px;text-decoration:none}
+.download-link:hover{text-decoration:underline}
+
+.agent-list{display:grid;grid-template-columns:220px 1fr;gap:20px}
+.agent-item{padding:10px 12px;border-radius:8px;cursor:pointer;font-size:13.5px;margin-bottom:4px}
+.agent-item:hover{background:#FAFAF9}
+.agent-item.active{background:var(--coral-soft);color:var(--coral-strong);font-weight:700}
+.version-pill{font-family:var(--mono);font-size:10.5px;background:#F4F4F2;border:1px solid var(--border);padding:1px 6px;border-radius:4px;color:var(--muted);margin-left:6px}
+
+.empty-state{text-align:center;padding:60px 20px;color:var(--muted)}
+select.role-select{width:auto;padding:6px 10px;font-size:13px}
+
+/* ---- Pipeline ao vivo (espelha o grafo do GitHub Actions, sem sair do site) ---- */
+.pipeline-wrap{margin-bottom:24px;padding:18px;background:#FAFAF9;border:1px solid var(--border);border-radius:12px;overflow-x:auto}
+.pipeline-wrap h3{font-size:13px;text-transform:uppercase;color:var(--muted);letter-spacing:.03em;margin:0 0 14px}
+.pipeline{display:flex;align-items:flex-start;gap:0;min-width:min-content}
+.pipeline-col{display:flex;flex-direction:column;justify-content:center;gap:8px;flex-shrink:0}
+.pipeline-connector{width:28px;height:2px;background:var(--border);align-self:center;flex-shrink:0;margin-top:22px}
+.pipeline-stage{display:flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--border);border-radius:8px;padding:9px 14px;font-size:13px;white-space:nowrap;min-width:170px}
+.pipeline-stage .icon{width:16px;height:16px;flex-shrink:0;display:flex;align-items:center;justify-content:center;border-radius:999px;font-size:11px}
+.pipeline-stage.completed .icon{background:var(--success-soft);color:var(--success)}
+.pipeline-stage.pending .icon{background:#EFEFED;color:var(--muted)}
+.pipeline-stage.running .icon{background:var(--warn-soft);color:var(--warn);animation:pipeline-pulse 1.2s ease-in-out infinite}
+.pipeline-stage.failed .icon{background:var(--danger-soft);color:var(--danger)}
+.pipeline-stage.pending{color:var(--muted)}
+.pipeline-stage .label{flex:1}
+.pipeline-stage .time{font-size:11px;color:var(--muted);font-family:var(--mono)}
+@keyframes pipeline-pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.pipeline-live-tag{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--warn);font-weight:700;margin-left:8px}
+.pipeline-live-tag .dot{width:6px;height:6px;border-radius:999px;background:var(--warn);animation:pipeline-pulse 1s ease-in-out infinite}
+</style>
+</head>
+<body>
+
+<!-- ============ LOGIN ============ -->
+<div id="login-screen">
+  <div class="login-card">
+    <h1>M&amp;A Analysis Engine</h1>
+    <p>BHub · uso interno</p>
+    <div class="field">
+      <label>E-mail</label>
+      <input type="email" id="login-email" autocomplete="username" />
+    </div>
+    <div class="field">
+      <label>Senha</label>
+      <input type="password" id="login-password" autocomplete="current-password" />
+    </div>
+    <button class="primary" id="login-btn" style="width:100%">Entrar</button>
+    <div class="error-msg hidden" id="login-error"></div>
+  </div>
+</div>
+
+<!-- ============ APP ============ -->
+<div id="app-screen" class="hidden">
+  <aside class="sidebar">
+    <div class="brand">M&amp;A Engine<span class="dot">.</span></div>
+
+    <div class="nav-section-label">Operação</div>
+    <div class="nav-item" data-page="deals">📁 Deals</div>
+
+    <div class="nav-section-label admin-only hidden">Governança</div>
+    <div class="nav-item admin-only hidden" data-page="agents">🤖 Agentes</div>
+    <div class="nav-item admin-only hidden" data-page="admin">👥 Administração</div>
+    <div class="nav-item admin-only hidden" data-page="activity">📋 Atividade</div>
+
+    <div class="sidebar-footer">
+      <div class="role-badge" id="sidebar-role"></div>
+      <div class="email" id="sidebar-email"></div>
+      <button class="ghost" id="change-password-btn" style="width:100%;background:transparent;color:rgba(255,255,255,.75);border-color:rgba(255,255,255,.2);margin-bottom:8px">Alterar senha</button>
+      <button class="ghost" id="logout-btn" style="width:100%;background:transparent;color:rgba(255,255,255,.75);border-color:rgba(255,255,255,.2)">Sair</button>
+    </div>
+  </aside>
+
+  <main class="content" id="content"></main>
+</div>
+
+<!-- ============ MODAL: novo deal ============ -->
+<div class="modal-backdrop hidden" id="new-deal-modal">
+  <div class="modal">
+    <h2>Novo deal</h2>
+    <p class="sub">Cria o registro e envia os arquivos. A extração e análise rodam depois.</p>
+    <div class="field">
+      <label>Nome do deal</label>
+      <input type="text" id="new-deal-name" placeholder="Ex: Escritório Fulano de Tal LTDA" />
+    </div>
+    <div class="field">
+      <label>Arquivos (formulário, DRE, Balancete...)</label>
+      <input type="file" id="new-deal-files" multiple />
+      <div class="file-list" id="new-deal-file-list"></div>
+    </div>
+    <div class="error-msg hidden" id="new-deal-error"></div>
+    <div class="modal-actions">
+      <button class="ghost" id="new-deal-cancel">Cancelar</button>
+      <button class="primary" id="new-deal-submit">Criar deal</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: detalhe do deal ============ -->
+<div class="modal-backdrop hidden" id="detail-modal">
+  <div class="modal" style="max-width:760px">
+    <h2 id="detail-title"></h2>
+    <p class="sub" id="detail-sub"></p>
+    <div id="detail-body"></div>
+    <div class="modal-actions">
+      <button class="ghost" id="detail-close">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MODAL: confirmar exclusão ============ -->
+<div class="modal-backdrop hidden" id="confirm-modal">
+  <div class="modal" style="max-width:440px">
+    <h2 id="confirm-title">Confirmar</h2>
+    <p class="sub" id="confirm-body"></p>
+    <div class="modal-actions">
+      <button class="ghost" id="confirm-cancel">Cancelar</button>
+      <button class="danger" id="confirm-ok">Excluir</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const SUPABASE_URL = "https://alapimvqkppfqbidxsvd.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFsYXBpbXZxa3BwZnFiaWR4c3ZkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY2OTkxMTIsImV4cCI6MjEwMjI3NTExMn0.5IkoO6qIXTaX2lhN_wS7Eqno1n_8QD9QlgeP8dOZrsM";
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const $ = (id) => document.getElementById(id);
+
+let state = { page: "deals", profile: null };
+
+// ---------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------
+function escapeHtml(s) {
+  const d = document.createElement("div");
+  d.textContent = s ?? "";
+  return d.innerHTML;
+}
+
+function relativeTime(isoString) {
+  if (!isoString) return "";
+  const diffMs = Date.now() - new Date(isoString).getTime();
+  const min = Math.round(diffMs / 60000);
+  if (min < 1) return "agora mesmo";
+  if (min < 60) return `há ${min} min`;
+  const h = Math.round(min / 60);
+  if (h < 24) return `há ${h} h`;
+  return `há ${Math.round(h / 24)} d`;
+}
+
+function sanitizeFilename(name) {
+  const lastDot = name.lastIndexOf(".");
+  const base = lastDot > 0 ? name.slice(0, lastDot) : name;
+  const ext = lastDot > 0 ? name.slice(lastDot + 1) : "";
+  const cleanBase = base.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9._-]/g, "_");
+  return ext ? `${cleanBase}.${ext}` : cleanBase;
+}
+
+async function logActivity(action, deal_id, details) {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) return;
+  await sb.from("activity_log").insert({
+    user_id: session.user.id, user_email: session.user.email, action, deal_id: deal_id || null, details: details || null,
+  });
+}
+
+function confirmDialog(title, body) {
+  return new Promise((resolve) => {
+    $("confirm-title").textContent = title;
+    $("confirm-body").textContent = body;
+    $("confirm-modal").classList.remove("hidden");
+    const onOk = () => { cleanup(); resolve(true); };
+    const onCancel = () => { cleanup(); resolve(false); };
+    function cleanup() {
+      $("confirm-modal").classList.add("hidden");
+      $("confirm-ok").removeEventListener("click", onOk);
+      $("confirm-cancel").removeEventListener("click", onCancel);
+    }
+    $("confirm-ok").addEventListener("click", onOk);
+    $("confirm-cancel").addEventListener("click", onCancel);
+  });
+}
+
+async function callEdgeFunction(name, body) {
+  const { data: { session } } = await sb.auth.getSession();
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/${name}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY, "Authorization": `Bearer ${session.access_token}` },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  return json;
+}
+
+// ---------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------
+async function checkSession() {
+  const { data: { session } } = await sb.auth.getSession();
+  if (session) await showApp(session); else showLogin();
+}
+
+function showLogin() {
+  $("login-screen").classList.remove("hidden");
+  $("app-screen").classList.add("hidden");
+}
+
+async function showApp(session) {
+  $("login-screen").classList.add("hidden");
+  $("app-screen").classList.remove("hidden");
+
+  const { data: profile } = await sb.from("profiles").select("*").eq("id", session.user.id).single();
+  state.profile = profile;
+
+  $("sidebar-email").textContent = session.user.email;
+  $("sidebar-role").textContent = profile?.role || "analyst";
+  $("sidebar-role").className = "role-badge " + (profile?.role || "analyst");
+
+  document.querySelectorAll(".admin-only").forEach(el => el.classList.toggle("hidden", profile?.role !== "admin"));
+
+  renderPage("deals");
+}
+
+$("login-btn").addEventListener("click", async () => {
+  const email = $("login-email").value.trim();
+  const password = $("login-password").value;
+  $("login-error").classList.add("hidden");
+  const { data, error } = await sb.auth.signInWithPassword({ email, password });
+  if (error) {
+    $("login-error").textContent = "E-mail ou senha incorretos.";
+    $("login-error").classList.remove("hidden");
+    return;
+  }
+  await showApp(data.session);
+});
+
+$("logout-btn").addEventListener("click", async () => {
+  await sb.auth.signOut();
+  showLogin();
+});
+
+$("change-password-btn").addEventListener("click", () => {
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal" style="max-width:400px">
+      <h2>Alterar senha</h2>
+      <p class="sub">Vale só para sua própria conta.</p>
+      <div class="field"><label>Nova senha</label><input type="password" id="new-password" /></div>
+      <div class="error-msg hidden" id="password-error"></div>
+      <div class="modal-actions">
+        <button class="ghost" id="password-cancel">Cancelar</button>
+        <button class="primary" id="password-submit">Salvar</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.querySelector("#password-cancel").onclick = () => backdrop.remove();
+  backdrop.querySelector("#password-submit").onclick = async () => {
+    const newPassword = backdrop.querySelector("#new-password").value;
+    const errEl = backdrop.querySelector("#password-error");
+    if (newPassword.length < 8) { errEl.textContent = "Pelo menos 8 caracteres."; errEl.classList.remove("hidden"); return; }
+    const { error } = await sb.auth.updateUser({ password: newPassword });
+    if (error) { errEl.textContent = "Erro: " + error.message; errEl.classList.remove("hidden"); return; }
+    backdrop.remove();
+    alert("Senha alterada.");
+  };
+});
+
+document.querySelectorAll(".nav-item[data-page]").forEach(el => {
+  el.addEventListener("click", () => renderPage(el.dataset.page));
+});
+
+function renderPage(page) {
+  state.page = page;
+  document.querySelectorAll(".nav-item[data-page]").forEach(el => el.classList.toggle("active", el.dataset.page === page));
+  // Achado real em 27/08, revisão de robustez: se o modal de detalhe
+  // estava aberto com o pipeline ao vivo rodando e a pessoa clica em
+  // outra página no menu (Agentes/Admin/Atividade) sem clicar em
+  // "Fechar" antes, o polling continuava rodando escondido pra sempre —
+  // nada nunca chamava `stopPipelinePolling()` nesse caminho. Trocar de
+  // página deveria sempre parar de observar o deal que estava aberto.
+  stopPipelinePolling();
+  $("detail-modal").classList.add("hidden");
+  if (page === "deals") renderDealsPage();
+  else if (page === "agents") renderAgentsPage();
+  else if (page === "admin") renderAdminPage();
+  else if (page === "activity") renderActivityPage();
+}
+
+// =======================================================================
+// PÁGINA: DEALS
+// =======================================================================
+async function renderDealsPage() {
+  const content = $("content");
+  content.innerHTML = `
+    <div class="page-header">
+      <div><h1>Deals</h1><p>Histórico de análises de M&amp;A</p></div>
+      <div class="toolbar-actions">
+        <button class="ghost" id="refresh-btn">↻ Atualizar</button>
+        <button class="primary" id="new-deal-btn">+ Novo Deal</button>
+      </div>
+    </div>
+    <table id="deals-table">
+      <thead><tr><th>Deal</th><th>Status</th><th>Complexidade</th><th>Recomendação</th><th>Criado em</th><th></th></tr></thead>
+      <tbody id="deals-tbody"></tbody>
+    </table>
+    <div class="empty-state hidden" id="empty-state">Nenhum deal ainda. Clique em "+ Novo Deal" para começar.</div>
+  `;
+  $("refresh-btn").addEventListener("click", loadDeals);
+  $("new-deal-btn").addEventListener("click", openNewDealModal);
+  loadDeals();
+}
+
+async function loadDeals() {
+  const { data: deals, error } = await sb.from("deals").select("*").order("created_at", { ascending: false });
+  if (error) { console.error(error); return; }
+
+  const tbody = $("deals-tbody");
+  tbody.innerHTML = "";
+  $("empty-state").classList.toggle("hidden", deals.length > 0);
+  const isAdmin = state.profile?.role === "admin";
+
+  for (const deal of deals) {
+    const [{ data: agentRuns }, { data: synthRuns }] = await Promise.all([
+      sb.from("agent_runs").select("*, agent_versions(agent_id, agents(name))").eq("deal_id", deal.id),
+      sb.from("synthesis_runs").select("*").eq("deal_id", deal.id).order("created_at", { ascending: false }).limit(1),
+    ]);
+    const complexityRun = (agentRuns || []).find(r => r.agent_versions?.agents?.name === "complexity");
+    const complexity = complexityRun?.output?.classificacao || "—";
+    const synth = (synthRuns || [])[0];
+    const recommendation = synth?.recommendation;
+
+    const tr = document.createElement("tr");
+    tr.className = "deal-row";
+    tr.innerHTML = `
+      <td>${escapeHtml(deal.name)}</td>
+      <td><span class="badge ${deal.status}">${deal.status}</span><br/><span style="font-size:11px;color:var(--muted)">${relativeTime(deal.updated_at)}</span></td>
+      <td>${escapeHtml(complexity)}</td>
+      <td>${recommendation ? `<span class="badge ${recommendation}">${recommendation}</span>` : "—"}</td>
+      <td>${new Date(deal.created_at).toLocaleDateString("pt-BR")}</td>
+      <td><div class="row-actions"></div></td>
+    `;
+    const actionsDiv = tr.querySelector(".row-actions");
+
+    if (["uploaded", "processing", "error"].includes(deal.status)) {
+      const btn = document.createElement("button");
+      btn.className = "primary";
+      btn.textContent = deal.status === "uploaded" ? "Analisar" : "Reprocessar";
+      btn.onclick = (e) => { e.stopPropagation(); triggerAnalysis(deal.id, btn); };
+      actionsDiv.appendChild(btn);
+    }
+    if (isAdmin) {
+      const delBtn = document.createElement("button");
+      delBtn.className = "icon-btn";
+      delBtn.title = "Excluir deal";
+      delBtn.textContent = "🗑";
+      delBtn.onclick = async (e) => {
+        e.stopPropagation();
+        const ok = await confirmDialog("Excluir deal?", `"${deal.name}" e todas as análises associadas serão apagadas. Essa ação não pode ser desfeita.`);
+        if (!ok) return;
+        const { error } = await sb.from("deals").delete().eq("id", deal.id);
+        if (error) { alert("Não foi possível excluir: " + error.message); return; }
+        await logActivity("delete_deal", deal.id, { name: deal.name });
+        loadDeals();
+      };
+      actionsDiv.appendChild(delBtn);
+    }
+
+    tr.addEventListener("click", () => openDetail(deal, agentRuns || [], synth));
+    tbody.appendChild(tr);
+  }
+}
+
+function openNewDealModal() {
+  $("new-deal-name").value = "";
+  $("new-deal-files").value = "";
+  $("new-deal-file-list").textContent = "";
+  $("new-deal-error").classList.add("hidden");
+  $("new-deal-modal").classList.remove("hidden");
+}
+$("new-deal-cancel").addEventListener("click", () => $("new-deal-modal").classList.add("hidden"));
+$("new-deal-files").addEventListener("change", (e) => {
+  $("new-deal-file-list").textContent = Array.from(e.target.files).map(f => f.name).join(", ");
+});
+
+$("new-deal-submit").addEventListener("click", async () => {
+  const name = $("new-deal-name").value.trim();
+  const files = Array.from($("new-deal-files").files);
+  const errEl = $("new-deal-error");
+  errEl.classList.add("hidden");
+  if (!name) { errEl.textContent = "Dê um nome para o deal."; errEl.classList.remove("hidden"); return; }
+
+  const submitBtn = $("new-deal-submit");
+  submitBtn.disabled = true;
+  submitBtn.textContent = "Criando...";
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    const { data: deal, error: dealError } = await sb.from("deals").insert({ name, created_by: session.user.id }).select().single();
+    if (dealError) throw dealError;
+
+    for (const file of files) {
+      const path = `${deal.id}/${sanitizeFilename(file.name)}`;
+      const { error: uploadError } = await sb.storage.from("deal-files").upload(path, file);
+      if (uploadError) throw uploadError;
+      const { error: fileRowError } = await sb.from("files").insert({
+        deal_id: deal.id, file_type: "other", original_filename: file.name, storage_ref: path, uploaded_by: session.user.id,
+      });
+      if (fileRowError) throw fileRowError;
+    }
+    await logActivity("create_deal", deal.id, { name, num_files: files.length });
+    $("new-deal-modal").classList.add("hidden");
+    loadDeals();
+  } catch (err) {
+    console.error(err);
+    errEl.textContent = "Erro ao criar o deal: " + (err.message || "erro desconhecido");
+    errEl.classList.remove("hidden");
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = "Criar deal";
+  }
+});
+
+async function triggerAnalysis(dealId, btn) {
+  btn.disabled = true;
+  btn.textContent = "Disparando...";
+  try {
+    await callEdgeFunction("trigger-analysis", { deal_id: dealId });
+    await sb.from("deals").update({ status: "processing" }).eq("id", dealId);
+    await logActivity("trigger_analysis", dealId);
+    loadDeals();
+  } catch (err) {
+    alert("Não foi possível disparar a análise: " + err.message);
+    btn.disabled = false;
+    btn.textContent = "Analisar";
+  }
+}
+
+function agentOutput(agentRuns, name) {
+  return agentRuns.find(r => r.agent_versions?.agents?.name === name)?.output || null;
+}
+
+// =======================================================================
+// PIPELINE AO VIVO (achado real em 27/08 — Thiago pediu pra acompanhar o
+// progresso do deal no próprio site, sem precisar abrir o GitHub Actions).
+// Espelha o grafo do workflow `.github/workflows/analise-ma.yml`: extract
+// → matrix de 6 análises em paralelo → synthesize (cfo_synthesis) →
+// generate_outputs. Não existe uma tabela de "andamento" no banco — cada
+// agente só grava sua linha em `agent_runs`/`synthesis_runs` QUANDO
+// TERMINA (`row["status"] = "completed"` sempre, ver run_agent.py:1340)
+// — não existe estado "rodando" gravado em lugar nenhum. Então o sinal de
+// progresso é simplesmente "a linha já existe?" — combinado com
+// `deals.status` pra saber se ainda vale a pena continuar checando ou se
+// já era (completed/error).
+const PIPELINE_MATRIX_AGENTS = [
+  { key: "complexity", label: "Complexidade" },
+  { key: "financial_analysis", label: "Análise Financeira" },
+  { key: "integration_risks", label: "Riscos de Integração" },
+  { key: "operational_risks", label: "Riscos Operacionais" },
+  { key: "opinion", label: "Parecer do Time" },
+  { key: "viabilidade_financeira", label: "Viabilidade Financeira" },
+];
+const PIPELINE_POLL_MS = 4000;
+let pipelineTimer = null;
+// Contador de geração (revisão de robustez, 27/08): usar só `dealId` como
+// guarda não fecha o caso de reabrir o MESMO deal duas vezes rápido (ex.:
+// duplo clique na linha) — a segunda chamada de `renderPipeline` tem o
+// MESMO dealId da primeira, então o `tick()` antigo, quando a consulta
+// dele responder, não seria descartado por uma comparação de dealId (são
+// iguais) e escreveria num container já descartado, além de poder chamar
+// `onSettled` da chamada antiga por engano. Um número que incrementa a
+// CADA chamada de `renderPipeline` (mesmo deal ou não) fecha esse buraco
+// de vez — cada chamada só reconhece a própria geração como válida.
+let pipelineGeneration = 0;
+
+function stopPipelinePolling() {
+  if (pipelineTimer) { clearInterval(pipelineTimer); pipelineTimer = null; }
+  pipelineGeneration++;
+}
+
+function formatDuration(ms) {
+  // Achado real em 27/08 (Thiago pediu pra ver quanto tempo cada etapa
+  // LEVOU, não só "há quanto tempo terminou"). O banco só grava o
+  // momento em que um agente TERMINA (`agent_runs.created_at`) — nunca
+  // quando começou (`run_agent.py` só grava a linha no fim, ver
+  // comentário mais abaixo em `_tempoInicioReferencia`). Duração de
+  // verdade só dá pra calcular entre dois pontos que a gente realmente
+  // tem: já que os 6 agentes da matrix começam todos juntos assim que a
+  // Extração termina (rodam em paralelo no workflow), a duração de CADA
+  // um é (fim dele − fim da Extração). Mesma lógica em cascata pra
+  // Síntese (começa quando o último da matrix termina) e Geração
+  // (começa quando a Síntese termina). Não existe essa referência pra
+  // Extração em si — por isso ela continua mostrando "há Xh" (quando
+  // terminou), não duração.
+  if (ms == null || ms < 0) return null;
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const restoS = s % 60;
+  if (m < 60) return restoS ? `${m}m ${restoS}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  const restoM = m % 60;
+  return restoM ? `${h}h ${restoM}m` : `${h}h`;
+}
+
+function pipelineStageHtml(label, status, timeLabel) {
+  const icon = status === "completed" ? "✓" : status === "failed" ? "✕" : status === "running" ? "" : "○";
+  return `<div class="pipeline-stage ${status}">
+    <span class="icon">${icon}</span>
+    <span class="label">${escapeHtml(label)}</span>
+    ${timeLabel ? `<span class="time">${escapeHtml(timeLabel)}</span>` : ""}
+  </div>`;
+}
+
+async function fetchPipelineState(dealId) {
+  const [{ data: deal }, { data: agentRuns }, { data: synthRuns }, { data: outputRows }] = await Promise.all([
+    sb.from("deals").select("status,updated_at").eq("id", dealId).single(),
+    sb.from("agent_runs").select("created_at, agent_versions(agents(name))").eq("deal_id", dealId),
+    sb.from("synthesis_runs").select("created_at").eq("deal_id", dealId).order("created_at", { ascending: false }).limit(1),
+    sb.from("outputs").select("created_at, excel_ref, ppt_ref").eq("deal_id", dealId).order("created_at", { ascending: false }).limit(1),
+  ]);
+  return { deal, agentRuns: agentRuns || [], synth: (synthRuns || [])[0] || null, output: (outputRows || [])[0] || null };
+}
+
+function renderPipelineHtml(state) {
+  const { deal, agentRuns, synth, output } = state;
+  const dealFalhou = deal?.status === "error";
+  const runOf = (name) => agentRuns.find(r => r.agent_versions?.agents?.name === name) || null;
+  const msOf = (run) => run ? new Date(run.created_at).getTime() : null;
+  const statusOf = (name) => {
+    if (runOf(name)) return "completed";
+    // Não dá pra saber, por agente, se ele falhou especificamente — só
+    // dá pra saber que o deal inteiro entrou em erro. Se o deal falhou e
+    // este estágio nunca chegou a gravar linha, mostra como "failed";
+    // senão fica "pending" (ainda não rodou) ou "running" (deal em
+    // processamento e a etapa deveria estar ativa agora).
+    if (dealFalhou) return "failed";
+    return "running";
+  };
+
+  const extractionRun = runOf("extraction");
+  const extractionStatus = extractionRun ? "completed" : statusOf("extraction");
+  const extractionMs = msOf(extractionRun);
+  const matrixReady = extractionStatus === "completed";
+
+  const matrixStatuses = PIPELINE_MATRIX_AGENTS.map(a => {
+    const run = matrixReady ? runOf(a.key) : null;
+    const ms = msOf(run);
+    // Duração real: fim deste agente − fim da Extração (é quando ele
+    // começou a rodar, já que a matrix inteira dispara em paralelo
+    // assim que a Extração termina).
+    const duracao = run && extractionMs != null ? formatDuration(ms - extractionMs) : null;
+    return {
+      ...a,
+      status: matrixReady ? (run ? "completed" : statusOf(a.key)) : "pending",
+      rotuloTempo: duracao || (run ? relativeTime(run.created_at) : ""),
+    };
+  });
+  const matrixDone = matrixStatuses.every(a => a.status === "completed");
+  const ultimoDaMatrixMs = matrixDone
+    ? Math.max(...PIPELINE_MATRIX_AGENTS.map(a => msOf(runOf(a.key))).filter(v => v != null))
+    : null;
+
+  const synthStatus = synth ? "completed" : (dealFalhou ? "failed" : (matrixDone ? "running" : "pending"));
+  const synthMs = synth ? new Date(synth.created_at).getTime() : null;
+  const synthDuracao = synth && ultimoDaMatrixMs != null ? formatDuration(synthMs - ultimoDaMatrixMs) : null;
+  const synthTempoLabel = synthDuracao || (synth ? relativeTime(synth.created_at) : "");
+
+  const outputStatus = output?.excel_ref && output?.ppt_ref ? "completed"
+    : (dealFalhou ? "failed" : (synthStatus === "completed" ? "running" : "pending"));
+  const outputMs = output ? new Date(output.created_at).getTime() : null;
+  const outputDuracao = output && synthMs != null ? formatDuration(outputMs - synthMs) : null;
+  const outputTempoLabel = outputDuracao || (output ? relativeTime(output.created_at) : "");
+
+  const liveTag = deal?.status === "processing"
+    ? `<span class="pipeline-live-tag"><span class="dot"></span>ao vivo</span>` : "";
+
+  return `
+    <div class="pipeline-wrap">
+      <h3>Progresso da análise${liveTag}</h3>
+      <div class="pipeline">
+        <div class="pipeline-col">${pipelineStageHtml("Extração", extractionStatus, extractionRun ? relativeTime(extractionRun.created_at) : "")}</div>
+        <div class="pipeline-connector"></div>
+        <div class="pipeline-col">${matrixStatuses.map(a => pipelineStageHtml(a.label, a.status, a.rotuloTempo)).join("")}</div>
+        <div class="pipeline-connector"></div>
+        <div class="pipeline-col">${pipelineStageHtml("Síntese (CFO)", synthStatus, synthTempoLabel)}</div>
+        <div class="pipeline-connector"></div>
+        <div class="pipeline-col">${pipelineStageHtml("Geração Excel/PPT", outputStatus, outputTempoLabel)}</div>
+      </div>
+    </div>`;
+}
+
+async function renderPipeline(dealId, container, onSettled) {
+  stopPipelinePolling();
+  const myGeneration = pipelineGeneration;
+  // Achado real em 27/08 (deal "Irko 2" — já chegava "completed" no primeiro
+  // tick, e mesmo assim `onSettled` disparava, reabrindo `openDetail`, que
+  // chamava `renderPipeline` de novo, que settle de novo... loop infinito,
+  // só limitado pela latência de rede — por isso parecia "atualizar tudo a
+  // cada segundo"). Só é uma TRANSIÇÃO de verdade (e só nesse caso vale a
+  // pena avisar quem chamou) se em algum tick anterior o status era
+  // "processing" — se já chegou pronto desde o primeiro tick, é só uma
+  // consulta normal, não um "acabou de terminar".
+  let observouProcessando = false;
+
+  async function tick() {
+    if (pipelineGeneration !== myGeneration) return; // outra chamada mais nova assumiu (mesmo deal ou não) — não pisa em nada
+    let state;
+    try {
+      state = await fetchPipelineState(dealId);
+    } catch (err) {
+      // Achado real em 27/08, teste de resiliência: uma falha de rede/timeout
+      // na consulta ao Supabase (bem comum de acontecer alguma hora) derrubava
+      // essa função inteira SEM capturar o erro — como `renderPipeline` é
+      // chamado sem `await`/`.catch()` em `openDetail`, isso virava uma
+      // promise rejeitada sem ninguém ouvir, e a linha do `setInterval`
+      // logo abaixo nunca chegava a rodar. Resultado: o painel travava em
+      // branco pra sempre na primeira instabilidade de rede, sem nunca
+      // tentar de novo. Agora um tick que falha só pula essa rodada — o
+      // `setInterval` já criado (ou a ser criado) garante uma nova
+      // tentativa em ${PIPELINE_POLL_MS / 1000}s, e se essa foi a
+      // PRIMEIRA tentativa (painel ainda nunca renderizou nada), mostra
+      // um aviso em vez de deixar em branco sem explicação nenhuma.
+      console.error("Falha ao atualizar o progresso do deal", dealId, err);
+      if (!container.dataset.pipelineRenderedOnce) {
+        container.innerHTML = `<div class="callout warn">Não foi possível carregar o progresso agora. Tentando de novo em alguns segundos...</div>`;
+      }
+      return;
+    }
+    if (pipelineGeneration !== myGeneration) return; // ficou obsoleta enquanto a consulta estava no ar
+    container.innerHTML = renderPipelineHtml(state);
+    container.dataset.pipelineRenderedOnce = "1";
+    if (state.deal?.status === "processing") {
+      observouProcessando = true;
+      return;
+    }
+    stopPipelinePolling();
+    if (observouProcessando && onSettled) onSettled(state.deal?.status);
+  }
+
+  await tick();
+  if (pipelineGeneration === myGeneration) {
+    pipelineTimer = setInterval(tick, PIPELINE_POLL_MS);
+  }
+}
+
+function openDetail(deal, agentRuns, synth) {
+  logActivity("view_deal", deal.id, { name: deal.name });
+  $("detail-title").textContent = deal.name;
+  $("detail-sub").textContent = `Status: ${deal.status}`;
+
+  const complexity = agentOutput(agentRuns, "complexity");
+  const opinion = agentOutput(agentRuns, "opinion");
+  const integration = agentOutput(agentRuns, "integration_risks");
+  const operational = agentOutput(agentRuns, "operational_risks");
+  const financial = agentOutput(agentRuns, "financial_analysis");
+
+  let html = "";
+  if (!synth && agentRuns.length === 0) {
+    html += `<div class="callout warn">Este deal ainda não foi analisado.</div>`;
+  }
+  if (synth) {
+    html += `<div class="detail-section"><h3>Recomendação final</h3><p><span class="badge ${synth.recommendation}">${synth.recommendation}</span></p><p>${escapeHtml(synth.output?.sumario_executivo || "")}</p></div>`;
+  }
+  if (complexity) html += `<div class="detail-section"><h3>Complexidade</h3><p>${escapeHtml(complexity.classificacao)}</p></div>`;
+  if (opinion) html += `<div class="detail-section"><h3>Parecer do time</h3><p>${escapeHtml(opinion.parecer_do_time || "")}</p></div>`;
+  if (financial) html += `<div class="detail-section"><h3>Análise financeira</h3><p>Resultado: ${escapeHtml(financial.resultado || "n/d")}</p></div>`;
+  if (integration || operational) {
+    html += `<div class="detail-section"><h3>Riscos</h3><ul>`;
+    for (const item of (integration?.riscos_integracao || [])) html += `<li>${escapeHtml(item)}</li>`;
+    for (const item of (operational?.riscos_operacionais || [])) html += `<li>${escapeHtml(item)}</li>`;
+    html += `</ul></div>`;
+  }
+  $("detail-body").innerHTML = html;
+
+  // Pipeline ao vivo vai ANTES do resto (é o que muda, é o que interessa
+  // primeiro enquanto o deal ainda está processando). Só faz sentido
+  // mostrar se o deal já saiu do estado "uploaded" (nunca rodou ainda).
+  if (deal.status !== "uploaded") {
+    const pipelineDiv = document.createElement("div");
+    $("detail-body").prepend(pipelineDiv);
+    renderPipeline(deal.id, pipelineDiv, async (finalStatus) => {
+      // Terminou (completed ou error) enquanto o modal estava aberto —
+      // recarrega o resumo estático (recomendação, riscos etc.) com dado
+      // fresco, e atualiza a linha na tabela de trás sem precisar de F5.
+      loadDeals();
+      if ($("detail-modal").classList.contains("hidden")) return; // já fechou, não reabre nada
+      const [{ data: freshDeal }, { data: freshRuns }, { data: freshSynth }] = await Promise.all([
+        sb.from("deals").select("*").eq("id", deal.id).single(),
+        sb.from("agent_runs").select("*, agent_versions(agent_id, agents(name))").eq("deal_id", deal.id),
+        sb.from("synthesis_runs").select("*").eq("deal_id", deal.id).order("created_at", { ascending: false }).limit(1),
+      ]);
+      // Achado real em 27/08, teste de concorrência multiusuário: se
+      // alguém (é um site com várias contas, tem botão de excluir deal)
+      // apagou ESTE deal enquanto outra pessoa ficou com o painel aberto
+      // observando, `freshDeal` volta `null` — `openDetail(null, ...)`
+      // quebraria na primeira linha (`deal.name` de um null). Deal
+      // sumiu, a resposta certa é só fechar o modal, não travar a tela.
+      if (!freshDeal) { $("detail-modal").classList.add("hidden"); return; }
+      openDetail(freshDeal, freshRuns || [], (freshSynth || [])[0]);
+    });
+  }
+
+  sb.from("outputs").select("*").eq("deal_id", deal.id).order("created_at", { ascending: false }).limit(1)
+    .then(async ({ data }) => {
+      if (!data || !data[0]) return;
+      const row = data[0];
+      const links = document.createElement("div");
+      links.style.marginTop = "10px";
+      for (const [label, ref] of [["↓ Baixar Excel", row.excel_ref], ["↓ Baixar PPT", row.ppt_ref]]) {
+        if (!ref) continue;
+        const { data: signed, error } = await sb.storage.from("deal-outputs").createSignedUrl(ref, 300);
+        if (error || !signed) continue;
+        const link = document.createElement("a");
+        link.href = signed.signedUrl;
+        link.className = "download-link";
+        link.textContent = label;
+        link.onclick = () => logActivity("download_output", deal.id, { file: ref });
+        links.appendChild(link);
+      }
+      $("detail-body").appendChild(links);
+    });
+
+  $("detail-modal").classList.remove("hidden");
+}
+$("detail-close").addEventListener("click", () => {
+  stopPipelinePolling();
+  $("detail-modal").classList.add("hidden");
+});
+
+// =======================================================================
+// PÁGINA: AGENTES (admin)
+// =======================================================================
+async function renderAgentsPage() {
+  const content = $("content");
+  content.innerHTML = `
+    <div class="page-header"><div><h1>Agentes</h1><p>Prompts versionados — cada edição cria uma versão nova, nunca sobrescreve</p></div></div>
+    <div class="agent-list">
+      <div id="agent-nav"></div>
+      <div id="agent-editor"><p class="callout">Selecione um agente à esquerda.</p></div>
+    </div>
+  `;
+  const { data: agents } = await sb.from("agents").select("*").order("name");
+  const nav = $("agent-nav");
+  for (const agent of agents) {
+    const item = document.createElement("div");
+    item.className = "agent-item";
+    item.textContent = agent.name;
+    item.onclick = () => {
+      document.querySelectorAll(".agent-item").forEach(el => el.classList.remove("active"));
+      item.classList.add("active");
+      loadAgentEditor(agent);
+    };
+    nav.appendChild(item);
+  }
+}
+
+async function loadAgentEditor(agent) {
+  const editor = $("agent-editor");
+  editor.innerHTML = "<p>Carregando...</p>";
+
+  const { data: versions } = await sb.from("agent_versions").select("*").eq("agent_id", agent.id).order("created_at", { ascending: false });
+  const activeVersion = versions.find(v => v.active) || versions[0];
+  const { data: prompts } = await sb.from("agent_prompts").select("*").eq("agent_version_id", activeVersion.id);
+  const promptText = prompts?.[0]?.system_prompt || "(sem prompt gravado)";
+
+  editor.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div><strong>${agent.name}</strong> <span class="version-pill">${activeVersion.version}</span> <span class="version-pill">${activeVersion.model}</span></div>
+    </div>
+    <textarea id="prompt-textarea" rows="20">${escapeHtml(promptText)}</textarea>
+    <div class="error-msg hidden" id="agent-save-error"></div>
+    <div class="modal-actions" style="justify-content:flex-start;margin-top:12px">
+      <button class="primary" id="agent-save-btn">Salvar nova versão</button>
+    </div>
+    <h3 style="margin-top:24px;font-size:12px;text-transform:uppercase;color:var(--muted)">Histórico de versões</h3>
+    <table style="margin-top:8px">
+      <thead><tr><th>Versão</th><th>Ativa</th><th>Modelo</th><th>Criada em</th></tr></thead>
+      <tbody>
+        ${versions.map(v => `<tr><td>${v.version}</td><td>${v.active ? "✓" : ""}</td><td>${v.model}</td><td>${new Date(v.created_at).toLocaleString("pt-BR")}</td></tr>`).join("")}
+      </tbody>
+    </table>
+  `;
+
+  $("agent-save-btn").addEventListener("click", async () => {
+    const btn = $("agent-save-btn");
+    const errEl = $("agent-save-error");
+    errEl.classList.add("hidden");
+    btn.disabled = true;
+    btn.textContent = "Salvando...";
+    try {
+      const newPrompt = $("prompt-textarea").value;
+      const result = await callEdgeFunction("save-agent-prompt", { agent_name: agent.name, system_prompt: newPrompt, model: activeVersion.model });
+      alert(`Nova versão criada: ${result.version}`);
+      loadAgentEditor(agent);
+    } catch (err) {
+      errEl.textContent = "Erro ao salvar: " + err.message;
+      errEl.classList.remove("hidden");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Salvar nova versão";
+    }
+  });
+}
+
+// =======================================================================
+// PÁGINA: ADMINISTRAÇÃO (admin)
+// =======================================================================
+async function renderAdminPage() {
+  const content = $("content");
+  content.innerHTML = `
+    <div class="page-header">
+      <div><h1>Administração</h1><p>Papéis de acesso do time</p></div>
+      <button class="primary" id="invite-btn">+ Criar conta</button>
+    </div>
+    <div class="callout" style="margin-bottom:16px">Você define a senha na hora de criar — combine com a pessoa por um canal seguro. Ela pode trocar a própria senha depois de logada, em "Alterar senha" no rodapé do menu.</div>
+    <table>
+      <thead><tr><th>Nome</th><th>E-mail</th><th>Papel</th><th>Desde</th></tr></thead>
+      <tbody id="admin-tbody"></tbody>
+    </table>
+  `;
+  $("invite-btn").addEventListener("click", openInviteModal);
+  const { data: profiles } = await sb.from("profiles").select("*").order("email");
+  const tbody = $("admin-tbody");
+  const { data: { session } } = await sb.auth.getSession();
+
+  for (const p of profiles) {
+    const tr = document.createElement("tr");
+    const isSelf = p.id === session.user.id;
+    tr.innerHTML = `
+      <td>${escapeHtml(p.name || "—")}</td>
+      <td>${escapeHtml(p.email)}${isSelf ? " <span style='color:var(--muted);font-size:12px'>(você)</span>" : ""}</td>
+      <td></td>
+      <td>${new Date(p.created_at).toLocaleDateString("pt-BR")}</td>
+    `;
+    const roleTd = tr.querySelectorAll("td")[2];
+    const select = document.createElement("select");
+    select.className = "role-select";
+    select.innerHTML = `<option value="analyst">Analyst (leitor)</option><option value="admin">Admin (leitor + editor)</option>`;
+    select.value = p.role;
+    select.disabled = isSelf;
+    select.onchange = async () => {
+      const newRole = select.value;
+      try {
+        await callEdgeFunction("update-user-role", { user_id: p.id, new_role: newRole });
+        renderAdminPage();
+      } catch (err) {
+        alert("Erro ao trocar papel: " + err.message);
+        select.value = p.role;
+      }
+    };
+    roleTd.appendChild(select);
+    tbody.appendChild(tr);
+  }
+}
+
+function openInviteModal() {
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal" style="max-width:440px">
+      <h2>Criar conta</h2>
+      <p class="sub">Você define a senha agora; a pessoa pode trocar depois, já logada, em "Alterar senha".</p>
+      <div class="field"><label>Nome</label><input type="text" id="create-name" /></div>
+      <div class="field"><label>E-mail</label><input type="email" id="create-email" /></div>
+      <div class="field">
+        <label>Senha</label>
+        <div style="display:flex;gap:8px">
+          <input type="text" id="create-password" />
+          <button type="button" class="ghost" id="gen-password-btn" style="white-space:nowrap">Gerar</button>
+        </div>
+      </div>
+      <div class="field"><label>Papel</label>
+        <select id="create-role"><option value="analyst">Analyst (leitor)</option><option value="admin">Admin (leitor + editor)</option></select>
+      </div>
+      <div class="error-msg hidden" id="create-error"></div>
+      <div class="modal-actions">
+        <button class="ghost" id="create-cancel">Cancelar</button>
+        <button class="primary" id="create-submit">Criar conta</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.querySelector("#create-cancel").onclick = () => backdrop.remove();
+  backdrop.querySelector("#gen-password-btn").onclick = () => {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+    let pwd = "";
+    for (let i = 0; i < 12; i++) pwd += chars[Math.floor(Math.random() * chars.length)];
+    backdrop.querySelector("#create-password").value = pwd;
+  };
+  backdrop.querySelector("#create-submit").onclick = async () => {
+    const name = backdrop.querySelector("#create-name").value.trim();
+    const email = backdrop.querySelector("#create-email").value.trim();
+    const password = backdrop.querySelector("#create-password").value;
+    const role = backdrop.querySelector("#create-role").value;
+    const errEl = backdrop.querySelector("#create-error");
+    const btn = backdrop.querySelector("#create-submit");
+    if (!email || !password) { errEl.textContent = "E-mail e senha são obrigatórios."; errEl.classList.remove("hidden"); return; }
+    if (password.length < 8) { errEl.textContent = "Senha precisa de pelo menos 8 caracteres."; errEl.classList.remove("hidden"); return; }
+    btn.disabled = true;
+    btn.textContent = "Criando...";
+    try {
+      await callEdgeFunction("create-user", { name, email, password, role });
+      alert(`Conta criada. Combine a senha com ${name || email} por um canal seguro (não fica salva em nenhum lugar depois deste momento).`);
+      backdrop.remove();
+      renderAdminPage();
+    } catch (err) {
+      errEl.textContent = "Erro ao criar conta: " + err.message;
+      errEl.classList.remove("hidden");
+      btn.disabled = false;
+      btn.textContent = "Criar conta";
+    }
+  };
+}
+
+// =======================================================================
+// PÁGINA: ATIVIDADE (admin)
+// =======================================================================
+const ACTION_LABELS = {
+  create_deal: "criou o deal", view_deal: "abriu o deal", delete_deal: "excluiu o deal",
+  trigger_analysis: "disparou análise em", download_output: "baixou arquivo de",
+  change_role: "alterou papel de acesso", edit_prompt: "editou prompt do agente",
+  create_user: "criou conta de",
+};
+
+let activityOffset = 0;
+const ACTIVITY_PAGE_SIZE = 50;
+
+async function renderActivityPage() {
+  const content = $("content");
+  const { data: profiles } = await sb.from("profiles").select("email").order("email");
+
+  content.innerHTML = `
+    <div class="page-header"><div><h1>Atividade</h1><p>Quem fez o quê, e quando</p></div></div>
+    <div style="display:flex;gap:10px;margin-bottom:16px">
+      <select id="filter-person" style="max-width:220px">
+        <option value="">Todas as pessoas</option>
+        ${profiles.map(p => `<option value="${escapeHtml(p.email)}">${escapeHtml(p.email)}</option>`).join("")}
+      </select>
+      <select id="filter-action" style="max-width:200px">
+        <option value="">Todas as ações</option>
+        ${Object.entries(ACTION_LABELS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}
+      </select>
+      <select id="filter-period" style="max-width:180px">
+        <option value="1">Hoje</option>
+        <option value="7" selected>Últimos 7 dias</option>
+        <option value="30">Últimos 30 dias</option>
+        <option value="0">Tudo</option>
+      </select>
+    </div>
+    <table>
+      <thead><tr><th>Quando</th><th>Quem</th><th>Ação</th><th>Detalhe</th></tr></thead>
+      <tbody id="activity-tbody"></tbody>
+    </table>
+    <div style="text-align:center;margin-top:16px">
+      <button class="ghost hidden" id="load-more-btn">Carregar mais</button>
+    </div>
+  `;
+  activityOffset = 0;
+  $("filter-person").addEventListener("change", () => loadActivity(true));
+  $("filter-action").addEventListener("change", () => loadActivity(true));
+  $("filter-period").addEventListener("change", () => loadActivity(true));
+  $("load-more-btn").addEventListener("click", () => loadActivity(false));
+  loadActivity(true);
+}
+
+async function loadActivity(reset) {
+  if (reset) { activityOffset = 0; $("activity-tbody").innerHTML = ""; }
+
+  let query = sb.from("activity_log").select("*").order("created_at", { ascending: false });
+
+  const person = $("filter-person").value;
+  const action = $("filter-action").value;
+  const periodDays = parseInt($("filter-period").value);
+
+  if (person) query = query.eq("user_email", person);
+  if (action) query = query.eq("action", action);
+  if (periodDays > 0) {
+    const since = new Date(Date.now() - periodDays * 86400000).toISOString();
+    query = query.gte("created_at", since);
+  }
+
+  query = query.range(activityOffset, activityOffset + ACTIVITY_PAGE_SIZE - 1);
+
+  const { data: logs, error } = await query;
+  if (error) { console.error(error); return; }
+
+  const tbody = $("activity-tbody");
+  for (const log of logs) {
+    const tr = document.createElement("tr");
+    const detail = log.action === "edit_prompt" ? log.details?.agent_name
+                 : log.action === "change_role" ? `novo papel: ${log.details?.new_role}`
+                 : log.action === "create_user" ? `${log.details?.created_email} (${log.details?.role})`
+                 : log.details?.name || log.details?.file || "";
+    tr.innerHTML = `
+      <td style="font-size:13px;color:var(--muted)">${new Date(log.created_at).toLocaleString("pt-BR")}</td>
+      <td>${escapeHtml(log.user_email || "")}</td>
+      <td>${ACTION_LABELS[log.action] || log.action}</td>
+      <td style="color:var(--muted);font-size:13px">${escapeHtml(detail)}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+  activityOffset += logs.length;
+  $("load-more-btn").classList.toggle("hidden", logs.length < ACTIVITY_PAGE_SIZE);
+  if (reset && logs.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:30px">Nenhuma atividade encontrada com esses filtros.</td></tr>`;
+  }
+}
+
+checkSession();
+</script>
+</body>
+</html>
