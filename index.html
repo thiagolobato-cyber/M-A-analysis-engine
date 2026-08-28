@@ -105,6 +105,25 @@ tr.deal-row:hover{background:#FAFAF9}
 
 .empty-state{text-align:center;padding:60px 20px;color:var(--muted)}
 select.role-select{width:auto;padding:6px 10px;font-size:13px}
+
+/* ---- Pipeline ao vivo (espelha o grafo do GitHub Actions, sem sair do site) ---- */
+.pipeline-wrap{margin-bottom:24px;padding:18px;background:#FAFAF9;border:1px solid var(--border);border-radius:12px;overflow-x:auto}
+.pipeline-wrap h3{font-size:13px;text-transform:uppercase;color:var(--muted);letter-spacing:.03em;margin:0 0 14px}
+.pipeline{display:flex;align-items:flex-start;gap:0;min-width:min-content}
+.pipeline-col{display:flex;flex-direction:column;justify-content:center;gap:8px;flex-shrink:0}
+.pipeline-connector{width:28px;height:2px;background:var(--border);align-self:center;flex-shrink:0;margin-top:22px}
+.pipeline-stage{display:flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--border);border-radius:8px;padding:9px 14px;font-size:13px;white-space:nowrap;min-width:170px}
+.pipeline-stage .icon{width:16px;height:16px;flex-shrink:0;display:flex;align-items:center;justify-content:center;border-radius:999px;font-size:11px}
+.pipeline-stage.completed .icon{background:var(--success-soft);color:var(--success)}
+.pipeline-stage.pending .icon{background:#EFEFED;color:var(--muted)}
+.pipeline-stage.running .icon{background:var(--warn-soft);color:var(--warn);animation:pipeline-pulse 1.2s ease-in-out infinite}
+.pipeline-stage.failed .icon{background:var(--danger-soft);color:var(--danger)}
+.pipeline-stage.pending{color:var(--muted)}
+.pipeline-stage .label{flex:1}
+.pipeline-stage .time{font-size:11px;color:var(--muted);font-family:var(--mono)}
+@keyframes pipeline-pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.pipeline-live-tag{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--warn);font-weight:700;margin-left:8px}
+.pipeline-live-tag .dot{width:6px;height:6px;border-radius:999px;background:var(--warn);animation:pipeline-pulse 1s ease-in-out infinite}
 </style>
 </head>
 <body>
@@ -510,6 +529,123 @@ function agentOutput(agentRuns, name) {
   return agentRuns.find(r => r.agent_versions?.agents?.name === name)?.output || null;
 }
 
+// =======================================================================
+// PIPELINE AO VIVO (achado real em 27/08 — Thiago pediu pra acompanhar o
+// progresso do deal no próprio site, sem precisar abrir o GitHub Actions).
+// Espelha o grafo do workflow `.github/workflows/analise-ma.yml`: extract
+// → matrix de 6 análises em paralelo → synthesize (cfo_synthesis) →
+// generate_outputs. Não existe uma tabela de "andamento" no banco — cada
+// agente só grava sua linha em `agent_runs`/`synthesis_runs` QUANDO
+// TERMINA (`row["status"] = "completed"` sempre, ver run_agent.py:1340)
+// — não existe estado "rodando" gravado em lugar nenhum. Então o sinal de
+// progresso é simplesmente "a linha já existe?" — combinado com
+// `deals.status` pra saber se ainda vale a pena continuar checando ou se
+// já era (completed/error).
+const PIPELINE_MATRIX_AGENTS = [
+  { key: "complexity", label: "Complexidade" },
+  { key: "financial_analysis", label: "Análise Financeira" },
+  { key: "integration_risks", label: "Riscos de Integração" },
+  { key: "operational_risks", label: "Riscos Operacionais" },
+  { key: "opinion", label: "Parecer do Time" },
+  { key: "viabilidade_financeira", label: "Viabilidade Financeira" },
+];
+const PIPELINE_POLL_MS = 4000;
+let pipelineTimer = null;
+let pipelineCurrentDealId = null;
+
+function stopPipelinePolling() {
+  if (pipelineTimer) { clearInterval(pipelineTimer); pipelineTimer = null; }
+  pipelineCurrentDealId = null;
+}
+
+function pipelineStageHtml(label, status, timeLabel) {
+  const icon = status === "completed" ? "✓" : status === "failed" ? "✕" : status === "running" ? "" : "○";
+  return `<div class="pipeline-stage ${status}">
+    <span class="icon">${icon}</span>
+    <span class="label">${escapeHtml(label)}</span>
+    ${timeLabel ? `<span class="time">${escapeHtml(timeLabel)}</span>` : ""}
+  </div>`;
+}
+
+async function fetchPipelineState(dealId) {
+  const [{ data: deal }, { data: agentRuns }, { data: synthRuns }, { data: outputRows }] = await Promise.all([
+    sb.from("deals").select("status,updated_at").eq("id", dealId).single(),
+    sb.from("agent_runs").select("created_at, agent_versions(agents(name))").eq("deal_id", dealId),
+    sb.from("synthesis_runs").select("created_at").eq("deal_id", dealId).order("created_at", { ascending: false }).limit(1),
+    sb.from("outputs").select("created_at, excel_ref, ppt_ref").eq("deal_id", dealId).order("created_at", { ascending: false }).limit(1),
+  ]);
+  return { deal, agentRuns: agentRuns || [], synth: (synthRuns || [])[0] || null, output: (outputRows || [])[0] || null };
+}
+
+function renderPipelineHtml(state) {
+  const { deal, agentRuns, synth, output } = state;
+  const dealFalhou = deal?.status === "error";
+  const dealConcluido = deal?.status === "completed";
+  const timeOf = (name) => {
+    const r = agentRuns.find(r => r.agent_versions?.agents?.name === name);
+    return r ? relativeTime(r.created_at) : "";
+  };
+  const statusOf = (name) => {
+    if (agentRuns.some(r => r.agent_versions?.agents?.name === name)) return "completed";
+    // Não dá pra saber, por agente, se ele falhou especificamente — só
+    // dá pra saber que o deal inteiro entrou em erro. Se o deal falhou e
+    // este estágio nunca chegou a gravar linha, mostra como "failed";
+    // senão fica "pending" (ainda não rodou) ou "running" (deal em
+    // processamento e a etapa deveria estar ativa agora).
+    if (dealFalhou) return "failed";
+    return "running";
+  };
+
+  const extractionStatus = statusOf("extraction");
+  const matrixReady = extractionStatus === "completed";
+  const matrixStatuses = PIPELINE_MATRIX_AGENTS.map(a => ({
+    ...a,
+    status: matrixReady ? statusOf(a.key) : "pending",
+  }));
+  const matrixDone = matrixStatuses.every(a => a.status === "completed");
+  const synthStatus = synth ? "completed" : (dealFalhou ? "failed" : (matrixDone ? "running" : "pending"));
+  const outputStatus = output?.excel_ref && output?.ppt_ref ? "completed"
+    : (dealFalhou ? "failed" : (synthStatus === "completed" ? "running" : "pending"));
+
+  const liveTag = deal?.status === "processing"
+    ? `<span class="pipeline-live-tag"><span class="dot"></span>ao vivo</span>` : "";
+
+  return `
+    <div class="pipeline-wrap">
+      <h3>Progresso da análise${liveTag}</h3>
+      <div class="pipeline">
+        <div class="pipeline-col">${pipelineStageHtml("Extração", extractionStatus, timeOf("extraction"))}</div>
+        <div class="pipeline-connector"></div>
+        <div class="pipeline-col">${matrixStatuses.map(a => pipelineStageHtml(a.label, a.status, timeOf(a.key))).join("")}</div>
+        <div class="pipeline-connector"></div>
+        <div class="pipeline-col">${pipelineStageHtml("Síntese (CFO)", synthStatus, synth ? relativeTime(synth.created_at) : "")}</div>
+        <div class="pipeline-connector"></div>
+        <div class="pipeline-col">${pipelineStageHtml("Geração Excel/PPT", outputStatus, output ? relativeTime(output.created_at) : "")}</div>
+      </div>
+    </div>`;
+}
+
+async function renderPipeline(dealId, container, onSettled) {
+  stopPipelinePolling();
+  pipelineCurrentDealId = dealId;
+
+  async function tick() {
+    if (pipelineCurrentDealId !== dealId) return; // modal trocou/fechou — não pisa em outro estado
+    const state = await fetchPipelineState(dealId);
+    if (pipelineCurrentDealId !== dealId) return; // fechou enquanto a query estava no ar
+    container.innerHTML = renderPipelineHtml(state);
+    if (state.deal?.status !== "processing") {
+      stopPipelinePolling();
+      if (onSettled) onSettled(state.deal?.status);
+    }
+  }
+
+  await tick();
+  if (pipelineCurrentDealId === dealId) {
+    pipelineTimer = setInterval(tick, PIPELINE_POLL_MS);
+  }
+}
+
 function openDetail(deal, agentRuns, synth) {
   logActivity("view_deal", deal.id, { name: deal.name });
   $("detail-title").textContent = deal.name;
@@ -539,6 +675,27 @@ function openDetail(deal, agentRuns, synth) {
   }
   $("detail-body").innerHTML = html;
 
+  // Pipeline ao vivo vai ANTES do resto (é o que muda, é o que interessa
+  // primeiro enquanto o deal ainda está processando). Só faz sentido
+  // mostrar se o deal já saiu do estado "uploaded" (nunca rodou ainda).
+  if (deal.status !== "uploaded") {
+    const pipelineDiv = document.createElement("div");
+    $("detail-body").prepend(pipelineDiv);
+    renderPipeline(deal.id, pipelineDiv, async (finalStatus) => {
+      // Terminou (completed ou error) enquanto o modal estava aberto —
+      // recarrega o resumo estático (recomendação, riscos etc.) com dado
+      // fresco, e atualiza a linha na tabela de trás sem precisar de F5.
+      loadDeals();
+      if ($("detail-modal").classList.contains("hidden")) return; // já fechou, não reabre nada
+      const [{ data: freshDeal }, { data: freshRuns }, { data: freshSynth }] = await Promise.all([
+        sb.from("deals").select("*").eq("id", deal.id).single(),
+        sb.from("agent_runs").select("*, agent_versions(agent_id, agents(name))").eq("deal_id", deal.id),
+        sb.from("synthesis_runs").select("*").eq("deal_id", deal.id).order("created_at", { ascending: false }).limit(1),
+      ]);
+      openDetail(freshDeal, freshRuns || [], (freshSynth || [])[0]);
+    });
+  }
+
   sb.from("outputs").select("*").eq("deal_id", deal.id).order("created_at", { ascending: false }).limit(1)
     .then(async ({ data }) => {
       if (!data || !data[0]) return;
@@ -561,7 +718,10 @@ function openDetail(deal, agentRuns, synth) {
 
   $("detail-modal").classList.remove("hidden");
 }
-$("detail-close").addEventListener("click", () => $("detail-modal").classList.add("hidden"));
+$("detail-close").addEventListener("click", () => {
+  stopPipelinePolling();
+  $("detail-modal").classList.add("hidden");
+});
 
 // =======================================================================
 // PÁGINA: AGENTES (admin)
