@@ -672,11 +672,19 @@ function renderPipelineHtml(state) {
   const liveTag = deal?.status === "processing"
     ? `<span class="pipeline-live-tag"><span class="dot"></span>ao vivo</span>` : "";
 
+  // Achado real em 27/08 (Thiago notou "há 1 d" do lado de "23s"/"2m 43s"
+  // e achou estranho, com razão): a Extração é a única etapa sem duração
+  // calculável (não sabemos quando o processamento inteiro começou), e
+  // mostrar "há Xh/d" ali do lado de durações de verdade parecia mais um
+  // tempo igual aos outros — confunde em vez de ajudar. Melhor não
+  // mostrar nada nela do que mostrar uma métrica de tipo diferente
+  // fingindo ser comparável às demais.
+
   return `
     <div class="pipeline-wrap">
       <h3>Progresso da análise${liveTag}</h3>
       <div class="pipeline">
-        <div class="pipeline-col">${pipelineStageHtml("Extração", extractionStatus, extractionRun ? relativeTime(extractionRun.created_at) : "")}</div>
+        <div class="pipeline-col">${pipelineStageHtml("Extração", extractionStatus, "")}</div>
         <div class="pipeline-connector"></div>
         <div class="pipeline-col">${matrixStatuses.map(a => pipelineStageHtml(a.label, a.status, a.rotuloTempo)).join("")}</div>
         <div class="pipeline-connector"></div>
