@@ -371,6 +371,14 @@ document.querySelectorAll(".nav-item[data-page]").forEach(el => {
 function renderPage(page) {
   state.page = page;
   document.querySelectorAll(".nav-item[data-page]").forEach(el => el.classList.toggle("active", el.dataset.page === page));
+  // Achado real em 27/08, revisão de robustez: se o modal de detalhe
+  // estava aberto com o pipeline ao vivo rodando e a pessoa clica em
+  // outra página no menu (Agentes/Admin/Atividade) sem clicar em
+  // "Fechar" antes, o polling continuava rodando escondido pra sempre —
+  // nada nunca chamava `stopPipelinePolling()` nesse caminho. Trocar de
+  // página deveria sempre parar de observar o deal que estava aberto.
+  stopPipelinePolling();
+  $("detail-modal").classList.add("hidden");
   if (page === "deals") renderDealsPage();
   else if (page === "agents") renderAgentsPage();
   else if (page === "admin") renderAdminPage();
@@ -551,11 +559,45 @@ const PIPELINE_MATRIX_AGENTS = [
 ];
 const PIPELINE_POLL_MS = 4000;
 let pipelineTimer = null;
-let pipelineCurrentDealId = null;
+// Contador de geração (revisão de robustez, 27/08): usar só `dealId` como
+// guarda não fecha o caso de reabrir o MESMO deal duas vezes rápido (ex.:
+// duplo clique na linha) — a segunda chamada de `renderPipeline` tem o
+// MESMO dealId da primeira, então o `tick()` antigo, quando a consulta
+// dele responder, não seria descartado por uma comparação de dealId (são
+// iguais) e escreveria num container já descartado, além de poder chamar
+// `onSettled` da chamada antiga por engano. Um número que incrementa a
+// CADA chamada de `renderPipeline` (mesmo deal ou não) fecha esse buraco
+// de vez — cada chamada só reconhece a própria geração como válida.
+let pipelineGeneration = 0;
 
 function stopPipelinePolling() {
   if (pipelineTimer) { clearInterval(pipelineTimer); pipelineTimer = null; }
-  pipelineCurrentDealId = null;
+  pipelineGeneration++;
+}
+
+function formatDuration(ms) {
+  // Achado real em 27/08 (Thiago pediu pra ver quanto tempo cada etapa
+  // LEVOU, não só "há quanto tempo terminou"). O banco só grava o
+  // momento em que um agente TERMINA (`agent_runs.created_at`) — nunca
+  // quando começou (`run_agent.py` só grava a linha no fim, ver
+  // comentário mais abaixo em `_tempoInicioReferencia`). Duração de
+  // verdade só dá pra calcular entre dois pontos que a gente realmente
+  // tem: já que os 6 agentes da matrix começam todos juntos assim que a
+  // Extração termina (rodam em paralelo no workflow), a duração de CADA
+  // um é (fim dele − fim da Extração). Mesma lógica em cascata pra
+  // Síntese (começa quando o último da matrix termina) e Geração
+  // (começa quando a Síntese termina). Não existe essa referência pra
+  // Extração em si — por isso ela continua mostrando "há Xh" (quando
+  // terminou), não duração.
+  if (ms == null || ms < 0) return null;
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const restoS = s % 60;
+  if (m < 60) return restoS ? `${m}m ${restoS}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  const restoM = m % 60;
+  return restoM ? `${h}h ${restoM}m` : `${h}h`;
 }
 
 function pipelineStageHtml(label, status, timeLabel) {
@@ -580,13 +622,10 @@ async function fetchPipelineState(dealId) {
 function renderPipelineHtml(state) {
   const { deal, agentRuns, synth, output } = state;
   const dealFalhou = deal?.status === "error";
-  const dealConcluido = deal?.status === "completed";
-  const timeOf = (name) => {
-    const r = agentRuns.find(r => r.agent_versions?.agents?.name === name);
-    return r ? relativeTime(r.created_at) : "";
-  };
+  const runOf = (name) => agentRuns.find(r => r.agent_versions?.agents?.name === name) || null;
+  const msOf = (run) => run ? new Date(run.created_at).getTime() : null;
   const statusOf = (name) => {
-    if (agentRuns.some(r => r.agent_versions?.agents?.name === name)) return "completed";
+    if (runOf(name)) return "completed";
     // Não dá pra saber, por agente, se ele falhou especificamente — só
     // dá pra saber que o deal inteiro entrou em erro. Se o deal falhou e
     // este estágio nunca chegou a gravar linha, mostra como "failed";
@@ -596,16 +635,39 @@ function renderPipelineHtml(state) {
     return "running";
   };
 
-  const extractionStatus = statusOf("extraction");
+  const extractionRun = runOf("extraction");
+  const extractionStatus = extractionRun ? "completed" : statusOf("extraction");
+  const extractionMs = msOf(extractionRun);
   const matrixReady = extractionStatus === "completed";
-  const matrixStatuses = PIPELINE_MATRIX_AGENTS.map(a => ({
-    ...a,
-    status: matrixReady ? statusOf(a.key) : "pending",
-  }));
+
+  const matrixStatuses = PIPELINE_MATRIX_AGENTS.map(a => {
+    const run = matrixReady ? runOf(a.key) : null;
+    const ms = msOf(run);
+    // Duração real: fim deste agente − fim da Extração (é quando ele
+    // começou a rodar, já que a matrix inteira dispara em paralelo
+    // assim que a Extração termina).
+    const duracao = run && extractionMs != null ? formatDuration(ms - extractionMs) : null;
+    return {
+      ...a,
+      status: matrixReady ? (run ? "completed" : statusOf(a.key)) : "pending",
+      rotuloTempo: duracao || (run ? relativeTime(run.created_at) : ""),
+    };
+  });
   const matrixDone = matrixStatuses.every(a => a.status === "completed");
+  const ultimoDaMatrixMs = matrixDone
+    ? Math.max(...PIPELINE_MATRIX_AGENTS.map(a => msOf(runOf(a.key))).filter(v => v != null))
+    : null;
+
   const synthStatus = synth ? "completed" : (dealFalhou ? "failed" : (matrixDone ? "running" : "pending"));
+  const synthMs = synth ? new Date(synth.created_at).getTime() : null;
+  const synthDuracao = synth && ultimoDaMatrixMs != null ? formatDuration(synthMs - ultimoDaMatrixMs) : null;
+  const synthTempoLabel = synthDuracao || (synth ? relativeTime(synth.created_at) : "");
+
   const outputStatus = output?.excel_ref && output?.ppt_ref ? "completed"
     : (dealFalhou ? "failed" : (synthStatus === "completed" ? "running" : "pending"));
+  const outputMs = output ? new Date(output.created_at).getTime() : null;
+  const outputDuracao = output && synthMs != null ? formatDuration(outputMs - synthMs) : null;
+  const outputTempoLabel = outputDuracao || (output ? relativeTime(output.created_at) : "");
 
   const liveTag = deal?.status === "processing"
     ? `<span class="pipeline-live-tag"><span class="dot"></span>ao vivo</span>` : "";
@@ -614,34 +676,67 @@ function renderPipelineHtml(state) {
     <div class="pipeline-wrap">
       <h3>Progresso da análise${liveTag}</h3>
       <div class="pipeline">
-        <div class="pipeline-col">${pipelineStageHtml("Extração", extractionStatus, timeOf("extraction"))}</div>
+        <div class="pipeline-col">${pipelineStageHtml("Extração", extractionStatus, extractionRun ? relativeTime(extractionRun.created_at) : "")}</div>
         <div class="pipeline-connector"></div>
-        <div class="pipeline-col">${matrixStatuses.map(a => pipelineStageHtml(a.label, a.status, timeOf(a.key))).join("")}</div>
+        <div class="pipeline-col">${matrixStatuses.map(a => pipelineStageHtml(a.label, a.status, a.rotuloTempo)).join("")}</div>
         <div class="pipeline-connector"></div>
-        <div class="pipeline-col">${pipelineStageHtml("Síntese (CFO)", synthStatus, synth ? relativeTime(synth.created_at) : "")}</div>
+        <div class="pipeline-col">${pipelineStageHtml("Síntese (CFO)", synthStatus, synthTempoLabel)}</div>
         <div class="pipeline-connector"></div>
-        <div class="pipeline-col">${pipelineStageHtml("Geração Excel/PPT", outputStatus, output ? relativeTime(output.created_at) : "")}</div>
+        <div class="pipeline-col">${pipelineStageHtml("Geração Excel/PPT", outputStatus, outputTempoLabel)}</div>
       </div>
     </div>`;
 }
 
 async function renderPipeline(dealId, container, onSettled) {
   stopPipelinePolling();
-  pipelineCurrentDealId = dealId;
+  const myGeneration = pipelineGeneration;
+  // Achado real em 27/08 (deal "Irko 2" — já chegava "completed" no primeiro
+  // tick, e mesmo assim `onSettled` disparava, reabrindo `openDetail`, que
+  // chamava `renderPipeline` de novo, que settle de novo... loop infinito,
+  // só limitado pela latência de rede — por isso parecia "atualizar tudo a
+  // cada segundo"). Só é uma TRANSIÇÃO de verdade (e só nesse caso vale a
+  // pena avisar quem chamou) se em algum tick anterior o status era
+  // "processing" — se já chegou pronto desde o primeiro tick, é só uma
+  // consulta normal, não um "acabou de terminar".
+  let observouProcessando = false;
 
   async function tick() {
-    if (pipelineCurrentDealId !== dealId) return; // modal trocou/fechou — não pisa em outro estado
-    const state = await fetchPipelineState(dealId);
-    if (pipelineCurrentDealId !== dealId) return; // fechou enquanto a query estava no ar
-    container.innerHTML = renderPipelineHtml(state);
-    if (state.deal?.status !== "processing") {
-      stopPipelinePolling();
-      if (onSettled) onSettled(state.deal?.status);
+    if (pipelineGeneration !== myGeneration) return; // outra chamada mais nova assumiu (mesmo deal ou não) — não pisa em nada
+    let state;
+    try {
+      state = await fetchPipelineState(dealId);
+    } catch (err) {
+      // Achado real em 27/08, teste de resiliência: uma falha de rede/timeout
+      // na consulta ao Supabase (bem comum de acontecer alguma hora) derrubava
+      // essa função inteira SEM capturar o erro — como `renderPipeline` é
+      // chamado sem `await`/`.catch()` em `openDetail`, isso virava uma
+      // promise rejeitada sem ninguém ouvir, e a linha do `setInterval`
+      // logo abaixo nunca chegava a rodar. Resultado: o painel travava em
+      // branco pra sempre na primeira instabilidade de rede, sem nunca
+      // tentar de novo. Agora um tick que falha só pula essa rodada — o
+      // `setInterval` já criado (ou a ser criado) garante uma nova
+      // tentativa em ${PIPELINE_POLL_MS / 1000}s, e se essa foi a
+      // PRIMEIRA tentativa (painel ainda nunca renderizou nada), mostra
+      // um aviso em vez de deixar em branco sem explicação nenhuma.
+      console.error("Falha ao atualizar o progresso do deal", dealId, err);
+      if (!container.dataset.pipelineRenderedOnce) {
+        container.innerHTML = `<div class="callout warn">Não foi possível carregar o progresso agora. Tentando de novo em alguns segundos...</div>`;
+      }
+      return;
     }
+    if (pipelineGeneration !== myGeneration) return; // ficou obsoleta enquanto a consulta estava no ar
+    container.innerHTML = renderPipelineHtml(state);
+    container.dataset.pipelineRenderedOnce = "1";
+    if (state.deal?.status === "processing") {
+      observouProcessando = true;
+      return;
+    }
+    stopPipelinePolling();
+    if (observouProcessando && onSettled) onSettled(state.deal?.status);
   }
 
   await tick();
-  if (pipelineCurrentDealId === dealId) {
+  if (pipelineGeneration === myGeneration) {
     pipelineTimer = setInterval(tick, PIPELINE_POLL_MS);
   }
 }
@@ -692,6 +787,13 @@ function openDetail(deal, agentRuns, synth) {
         sb.from("agent_runs").select("*, agent_versions(agent_id, agents(name))").eq("deal_id", deal.id),
         sb.from("synthesis_runs").select("*").eq("deal_id", deal.id).order("created_at", { ascending: false }).limit(1),
       ]);
+      // Achado real em 27/08, teste de concorrência multiusuário: se
+      // alguém (é um site com várias contas, tem botão de excluir deal)
+      // apagou ESTE deal enquanto outra pessoa ficou com o painel aberto
+      // observando, `freshDeal` volta `null` — `openDetail(null, ...)`
+      // quebraria na primeira linha (`deal.name` de um null). Deal
+      // sumiu, a resposta certa é só fechar o modal, não travar a tela.
+      if (!freshDeal) { $("detail-modal").classList.add("hidden"); return; }
       openDetail(freshDeal, freshRuns || [], (freshSynth || [])[0]);
     });
   }
