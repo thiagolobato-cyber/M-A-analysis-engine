@@ -30,6 +30,7 @@ import subprocess
 import sys
 import urllib.request
 import urllib.error
+from datetime import datetime, timezone
 
 from openpyxl import load_workbook
 
@@ -643,6 +644,11 @@ def run_extraction(deal_id: str):
     injetada direto no resultado — não pedimos pro Claude copiar de volta
     uma tabela de centenas de contas x 12 meses que o código já tem. Isso
     era o que estava estourando o timeout de 10 minutos (visto em 19/08)."""
+    inicio = datetime.now(timezone.utc)  # achado real em 28/08 (item 2 da lista
+    # de melhorias): sem isso, o site não tinha como saber quanto tempo CADA
+    # agente levou de verdade — só "há quanto tempo terminou". Grava junto
+    # com o resultado (`started_at`), pro front calcular a duração real de
+    # cada estágio sem precisar aproximar assumindo que todos começam juntos.
     files = supabase_request("GET", f"files?deal_id=eq.{deal_id}")
     if not files:
         raise SystemExit(f"Nenhum arquivo encontrado para o deal {deal_id} — nada para extrair.")
@@ -940,6 +946,7 @@ def run_extraction(deal_id: str):
         "status": "completed",
         "output": output,
         "confidence": output.get("confidence"),
+        "started_at": inicio.isoformat(),
     })
     print(f"[extraction] deal_data criado ({deal_data_id}), confidence={output.get('confidence')}")
 
@@ -1124,6 +1131,7 @@ def main():
     parser.add_argument("--agent", required=True)
     parser.add_argument("--deal-id", required=True)
     args = parser.parse_args()
+    inicio = datetime.now(timezone.utc)  # ver comentário equivalente em run_extraction
 
     if args.agent == "extraction":
         run_extraction(args.deal_id)
@@ -1340,6 +1348,7 @@ def main():
         "status": "completed",
         "output": output,
         "confidence": output.get("confidence"),
+        "started_at": inicio.isoformat(),
     }
     if table == "agent_runs":
         row["deal_data_id"] = deal_data["id"]

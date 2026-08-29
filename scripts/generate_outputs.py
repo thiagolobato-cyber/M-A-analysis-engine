@@ -32,6 +32,26 @@ from openpyxl.utils import get_column_letter
 
 from dre_balancete_parser import agregar_linhas_por_trimestre
 
+
+def _rotulos_linha_resultado(tabela_viab: dict | None) -> tuple[str, str, str]:
+    """Achado real em 27/08 (deal Irko): o Excel/PPT sempre chamavam a
+    linha final da tabela de Viabilidade Financeira de "Lucro
+    Operacional"/"Margem EBITDA", mesmo quando `montar_tabela_
+    viabilidade_financeira` (dre_balancete_parser.py) só achou "LUCRO
+    LÍQUIDO" na DRE (sem nenhuma linha de resultado operacional
+    reconhecível) — o mesmo número que o agente `cfo_synthesis` já
+    descrevia corretamente em prosa como "margem líquida", criando duas
+    versões diferentes do MESMO fato pro Thiago/parceiro (Excel/PPT
+    dizendo EBITDA, resumo executivo dizendo líquida). `resultado_tipo`
+    (novo campo de `montar_tabela_viabilidade_financeira`) diz qual dos
+    dois foi realmente encontrado — esta função só traduz isso pros 3
+    textos usados no Excel/PPT. Default ("resultado_operacional" ou
+    ausência do campo, ex.: arquivo processado antes deste fix ainda
+    salvo no banco) preserva o texto histórico, sem quebrar nada."""
+    if tabela_viab and tabela_viab.get("resultado_tipo") == "lucro_liquido":
+        return ("(=) Lucro Líquido", "Margem Líquida (R$)", "Margem Líquida (%)")
+    return ("(=) Lucro Operacional", "Margem EBITDA (R$)", "Margem EBITDA (%)")
+
 from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
 from pptx.dml.color import RGBColor
@@ -227,6 +247,7 @@ def build_excel(bundle: dict, path: str):
     row += 1
     if tabela_viab and tabela_viab.get("linhas"):
         linhas_v = tabela_viab["linhas"]
+        rotulo_lucro, rotulo_margem_rs, rotulo_margem_pct = _rotulos_linha_resultado(tabela_viab)
         headers = ["R$"] + [l["periodo"] for l in linhas_v]
         for i, h in enumerate(headers, start=1):
             ws.cell(row=row, column=i, value=h)
@@ -237,8 +258,8 @@ def build_excel(bundle: dict, path: str):
             ("Receita Líquida", "receita_liquida", True), ("Folha de Pagamento", "folha_pagamento", False),
             ("Custo de Sistemas", "custo_sistemas", False), ("Margem Bruta (R$)", "margem_bruta_rs", True),
             ("Margem Bruta (%)", "margem_bruta_pct", True), ("Despesas Gerais", "despesas_gerais", False),
-            ("(=) Lucro Operacional", "lucro_operacional", True), ("(+) D&A", "d_a", False),
-            ("Margem EBITDA (R$)", "margem_ebitda_rs", True), ("Margem EBITDA (%)", "margem_ebitda_pct", True),
+            (rotulo_lucro, "lucro_operacional", True), ("(+) D&A", "d_a", False),
+            (rotulo_margem_rs, "margem_ebitda_rs", True), (rotulo_margem_pct, "margem_ebitda_pct", True),
         ]
         for label, campo, negrito in campos_v:
             ws.cell(row=row, column=1, value=label).font = Font(bold=negrito)
@@ -247,7 +268,16 @@ def build_excel(bundle: dict, path: str):
                 ws.cell(row=row, column=i, value=f"{v}%" if campo.endswith("_pct") and v is not None else v)
             row += 1
         if not tabela_viab.get("d_a_reconhecido"):
-            ws.cell(row=row, column=1, value="D&A não identificado nesta DRE — Margem EBITDA = Margem do Lucro Operacional (aproximação razoável quando D&A é imaterial).").font = Font(italic=True, size=9, color=TEXT_MUTED)
+            nota_da = (
+                f"D&A não identificado nesta DRE — \"{rotulo_margem_pct}\" = margem sobre "
+                f"\"{rotulo_lucro}\" (aproximação razoável quando D&A é imaterial)."
+                if tabela_viab.get("resultado_tipo") != "lucro_liquido" else
+                f"D&A não identificado nesta DRE, e a DRE também não separa uma linha de "
+                f"resultado operacional — \"{rotulo_lucro}\" aqui é o Lucro Líquido já reportado "
+                "pela própria DRE (após resultado financeiro e impostos sobre o lucro), não um "
+                "EBITDA aproximado."
+            )
+            ws.cell(row=row, column=1, value=nota_da).font = Font(italic=True, size=9, color=TEXT_MUTED)
             row += 1
         ws.cell(row=row, column=1, value=f"Fonte: DRE ({tabela_viab['fonte']}).").font = Font(italic=True, size=9, color=TEXT_MUTED)
         row += 2
@@ -588,12 +618,13 @@ def build_pptx(bundle: dict, path: str):
     table_top = Inches(1.85)
     if tabela_viab and tabela_viab.get("linhas"):
         linhas_dre = agregar_linhas_por_trimestre(tabela_viab["linhas"])
+        rotulo_lucro, _, rotulo_margem_pct = _rotulos_linha_resultado(tabela_viab)
         headers = ["R$ mil"] + [l["periodo"] for l in linhas_dre]
         campos = [
             ("Receita Bruta", "receita_bruta"), ("(=) Receita Líquida", "receita_liquida"),
             ("(-) Folha de Pagamento", "folha_pagamento"), ("(-) Custo Sistemas", "custo_sistemas"),
             ("Margem Bruta %", "margem_bruta_pct"), ("(-) Despesas Gerais", "despesas_gerais"),
-            ("(=) Lucro Operacional", "lucro_operacional"), ("Margem EBITDA %", "margem_ebitda_pct"),
+            (rotulo_lucro, "lucro_operacional"), (rotulo_margem_pct, "margem_ebitda_pct"),
         ]
         rows = []
         for label, campo in campos:
@@ -612,7 +643,20 @@ def build_pptx(bundle: dict, path: str):
         # título "EBITDA BRIDGE" logo abaixo quando a tabela tinha mais
         # linhas que o previsto.
         nota_top = table_top + row_h * (len(rows) + 1) + Inches(0.08)
-        nota_periodo = " (agregado por trimestre)" if len(tabela_viab["linhas"]) > 4 else ""
+        # Achado real em 27/08 (mesmo caso do fix do rótulo "T3", deal
+        # Irko): "(agregado por trimestre)" só é verdade quando os
+        # rótulos pós-agregação são mesmo trimestres (granularidade
+        # mensal). Numa DRE anual (2019 a 2021, 2022 a 2024, 2025...) a
+        # nota dizendo "trimestre" ficava tecnicamente errada, mesmo já
+        # com o rótulo "T3" corrigido — a legenda embaixo da tabela
+        # continuava contradizendo o cabeçalho da própria tabela.
+        eh_trimestre_de_verdade = any(re.fullmatch(r"T\d+", l["periodo"]) for l in linhas_dre)
+        if len(tabela_viab["linhas"]) <= 4:
+            nota_periodo = ""
+        elif eh_trimestre_de_verdade:
+            nota_periodo = " (agregado por trimestre)"
+        else:
+            nota_periodo = " (agregado a cada 3 períodos)"
         _add_textbox(s, MARGIN, nota_top, Inches(5.8), Inches(0.35),
                      f"Fonte: DRE ({tabela_viab['fonte']}){nota_periodo} — não confundir com o EBITDA Bridge ao lado (metodologia diferente).",
                      size=9, color=TEXT_MUTED)
@@ -737,7 +781,7 @@ def upload_to_storage(local_path: str, storage_path: str, content_type: str):
         print(f"Upload OK: {storage_path} ({resp.status})")
 
 
-def record_output_link(deal_id: str, synthesis_run_id: str | None, excel_path: str, pptx_path: str):
+def record_output_link(deal_id: str, synthesis_run_id: str | None, excel_path: str, pptx_path: str, inicio=None):
     """Sobe os 2 arquivos pro Storage e grava as referências em public.outputs
     — é isso que o frontend usa para gerar o link de download real (signed
     URL), sem precisar passar pelo GitHub Actions."""
@@ -761,6 +805,7 @@ def record_output_link(deal_id: str, synthesis_run_id: str | None, excel_path: s
         "synthesis_run_id": synthesis_run_id,
         "excel_ref": excel_storage_ref,
         "ppt_ref": pptx_storage_ref,
+        "started_at": (inicio or datetime.now(timezone.utc)).isoformat(),
     }
     url = os.environ["SUPABASE_URL"].rstrip("/") + "/rest/v1/outputs"
     key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
@@ -774,6 +819,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--deal-id", required=True)
     args = parser.parse_args()
+    inicio = datetime.now(timezone.utc)  # item 2 da lista de melhorias (28/08) — mesmo motivo do run_agent.py
 
     os.makedirs("output", exist_ok=True)
     bundle = fetch_deal_bundle(args.deal_id)
@@ -782,4 +828,4 @@ if __name__ == "__main__":
     pptx_path = f"output/{args.deal_id}_executivo.pptx"
     build_excel(bundle, excel_path)
     build_pptx(bundle, pptx_path)
-    record_output_link(args.deal_id, (bundle.get("synthesis") or {}).get("id"), excel_path, pptx_path)
+    record_output_link(args.deal_id, (bundle.get("synthesis") or {}).get("id"), excel_path, pptx_path, inicio)
