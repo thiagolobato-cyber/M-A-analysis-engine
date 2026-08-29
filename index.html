@@ -930,6 +930,20 @@ async function renderAgentsPage() {
   }
 }
 
+// Achado real em 28/08 (Thiago pediu): "Agentes" já é admin-only, mas o
+// Thiago quer restringir a EDIÇÃO de prompt (não a visualização) a só a
+// própria conta dele — outros admins do time devem continuar vendo o
+// prompt (transparência), só não podem clicar em "Salvar nova versão".
+// IMPORTANTE — limite real desta checagem: ela roda no navegador, então
+// é sobre "impedir clique sem querer / uso normal do time", não uma
+// barreira de segurança contra alguém que abra o DevTools de propósito
+// e chame `callEdgeFunction("save-agent-prompt", ...)` direto. Proteção
+// de verdade exigiria checar o e-mail também dentro da Edge Function
+// `save-agent-prompt` (supabase/functions/save-agent-prompt/index.ts) —
+// não fiz isso ainda porque não vi esse arquivo nesta sessão; se quiser
+// essa camada a mais, é só pedir.
+const PROMPT_EDITOR_EMAIL = "thiago.lobato@bhub.ai";
+
 async function loadAgentEditor(agent) {
   const editor = $("agent-editor");
   editor.innerHTML = "<p>Carregando...</p>";
@@ -959,6 +973,9 @@ async function loadAgentEditor(agent) {
     return;
   }
 
+  const { data: { session } } = await sb.auth.getSession();
+  const podeEditar = session?.user?.email === PROMPT_EDITOR_EMAIL;
+
   const { data: versions } = await sb.from("agent_versions").select("*").eq("agent_id", agent.id).order("created_at", { ascending: false });
   const activeVersion = versions.find(v => v.active) || versions[0];
   const { data: prompts } = await sb.from("agent_prompts").select("*").eq("agent_version_id", activeVersion.id);
@@ -968,10 +985,11 @@ async function loadAgentEditor(agent) {
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
       <div><strong>${escapeHtml(AGENT_DISPLAY_NAMES[agent.name] || agent.name)}</strong> <span class="version-pill">${activeVersion.version}</span> <span class="version-pill">${activeVersion.model}</span> <span class="version-pill" style="opacity:.6">${escapeHtml(agent.name)}</span></div>
     </div>
-    <textarea id="prompt-textarea" rows="20">${escapeHtml(promptText)}</textarea>
+    ${!podeEditar ? `<div class="callout" style="margin-bottom:14px">Edição de prompt restrita — só ${escapeHtml(PROMPT_EDITOR_EMAIL)} pode salvar uma versão nova. Você pode ler o prompt abaixo, mas o campo está bloqueado.</div>` : ""}
+    <textarea id="prompt-textarea" rows="20" ${!podeEditar ? "readonly disabled" : ""}>${escapeHtml(promptText)}</textarea>
     <div class="error-msg hidden" id="agent-save-error"></div>
     <div class="modal-actions" style="justify-content:flex-start;margin-top:12px">
-      <button class="primary" id="agent-save-btn">Salvar nova versão</button>
+      <button class="primary" id="agent-save-btn" ${!podeEditar ? "disabled title=\"Restrito ao dono do prompt\"" : ""}>Salvar nova versão</button>
     </div>
     <h3 style="margin-top:24px;font-size:12px;text-transform:uppercase;color:var(--muted)">Histórico de versões</h3>
     <table style="margin-top:8px">
@@ -981,6 +999,8 @@ async function loadAgentEditor(agent) {
       </tbody>
     </table>
   `;
+
+  if (!podeEditar) return; // botão desabilitado; nem vale registrar o listener de salvar
 
   $("agent-save-btn").addEventListener("click", async () => {
     const btn = $("agent-save-btn");
