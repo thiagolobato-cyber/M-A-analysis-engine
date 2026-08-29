@@ -549,14 +549,26 @@ function agentOutput(agentRuns, name) {
 // progresso é simplesmente "a linha já existe?" — combinado com
 // `deals.status` pra saber se ainda vale a pena continuar checando ou se
 // já era (completed/error).
+// Nomes de exibição — fonte única (achado real em 28/08: o Thiago pediu
+// pra página "Agentes" mostrar os mesmos nomes que já apareciam no
+// pipeline ao vivo, em vez do nome técnico interno). Um mapa só, usado
+// nos dois lugares — evita os dois textos desalinharem de novo no futuro
+// se alguém editar um sem lembrar do outro.
+const AGENT_DISPLAY_NAMES = {
+  extraction: "Extração",
+  complexity: "Complexidade",
+  financial_analysis: "Análise Financeira",
+  integration_risks: "Riscos de Integração",
+  operational_risks: "Riscos Operacionais",
+  opinion: "Parecer do Time",
+  viabilidade_financeira: "Viabilidade Financeira",
+  cfo_synthesis: "Síntese (CFO)",
+};
+
 const PIPELINE_MATRIX_AGENTS = [
-  { key: "complexity", label: "Complexidade" },
-  { key: "financial_analysis", label: "Análise Financeira" },
-  { key: "integration_risks", label: "Riscos de Integração" },
-  { key: "operational_risks", label: "Riscos Operacionais" },
-  { key: "opinion", label: "Parecer do Time" },
-  { key: "viabilidade_financeira", label: "Viabilidade Financeira" },
-];
+  "complexity", "financial_analysis", "integration_risks",
+  "operational_risks", "opinion", "viabilidade_financeira",
+].map(key => ({ key, label: AGENT_DISPLAY_NAMES[key] }));
 const PIPELINE_POLL_MS = 4000;
 let pipelineTimer = null;
 // Contador de geração (revisão de robustez, 27/08): usar só `dealId` como
@@ -836,7 +848,6 @@ $("detail-close").addEventListener("click", () => {
 // =======================================================================
 // PÁGINA: AGENTES (admin)
 // =======================================================================
-// =======================================================================
 // REGRAS DE CÓDIGO (não são prompt de IA) — achado real em 28/08: o
 // Thiago clicava em `complexity`/`integration_risks`/`operational_risks`/
 // `viabilidade_financeira` na página "Agentes" e via só "(sem prompt
@@ -909,7 +920,7 @@ async function renderAgentsPage() {
   for (const agent of agents) {
     const item = document.createElement("div");
     item.className = "agent-item";
-    item.textContent = agent.name;
+    item.textContent = AGENT_DISPLAY_NAMES[agent.name] || agent.name;
     item.onclick = () => {
       document.querySelectorAll(".agent-item").forEach(el => el.classList.remove("active"));
       item.classList.add("active");
@@ -931,7 +942,7 @@ async function loadAgentEditor(agent) {
   if (regrasCodigo) {
     editor.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-        <div><strong>${escapeHtml(agent.name)}</strong> <span class="version-pill">100% código</span></div>
+        <div><strong>${escapeHtml(AGENT_DISPLAY_NAMES[agent.name] || agent.name)}</strong> <span class="version-pill">100% código</span> <span class="version-pill" style="opacity:.6">${escapeHtml(agent.name)}</span></div>
       </div>
       <div class="callout" style="margin-bottom:14px">
         Este agente não usa IA — é regra determinística em
@@ -955,7 +966,7 @@ async function loadAgentEditor(agent) {
 
   editor.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-      <div><strong>${agent.name}</strong> <span class="version-pill">${activeVersion.version}</span> <span class="version-pill">${activeVersion.model}</span></div>
+      <div><strong>${escapeHtml(AGENT_DISPLAY_NAMES[agent.name] || agent.name)}</strong> <span class="version-pill">${activeVersion.version}</span> <span class="version-pill">${activeVersion.model}</span> <span class="version-pill" style="opacity:.6">${escapeHtml(agent.name)}</span></div>
     </div>
     <textarea id="prompt-textarea" rows="20">${escapeHtml(promptText)}</textarea>
     <div class="error-msg hidden" id="agent-save-error"></div>
