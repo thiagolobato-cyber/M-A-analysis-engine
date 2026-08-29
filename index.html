@@ -569,21 +569,36 @@ const PIPELINE_MATRIX_AGENTS = [
   "complexity", "financial_analysis", "integration_risks",
   "operational_risks", "opinion", "viabilidade_financeira",
 ].map(key => ({ key, label: AGENT_DISPLAY_NAMES[key] }));
-const PIPELINE_POLL_MS = 4000;
-let pipelineTimer = null;
+
+// Achado real em 28/08 (item 1 da lista de melhorias): polling a cada 4s
+// pergunta "mudou alguma coisa?" o tempo todo, mesmo quando não muda nada
+// — o banco já sabe quando muda de verdade (é literalmente o Postgres),
+// então faz mais sentido ele avisar (push via WebSocket, Supabase
+// Realtime) do que o navegador ficar perguntando (poll). Trocado de vez
+// pelo Realtime abaixo. Mantém um plano B de polling BEM mais espaçado
+// (15s, só rede de segurança) caso o WebSocket falhe por algum motivo
+// de rede (proxy corporativo bloqueando, etc.) — sem isso, uma falha de
+// WebSocket deixaria o painel morto silenciosamente, sem nunca avisar.
+const PIPELINE_FALLBACK_POLL_MS = 15000;
+let pipelineChannel = null;
+let pipelineFallbackTimer = null;
+let pipelineInitialRetryTimer = null;
 // Contador de geração (revisão de robustez, 27/08): usar só `dealId` como
 // guarda não fecha o caso de reabrir o MESMO deal duas vezes rápido (ex.:
 // duplo clique na linha) — a segunda chamada de `renderPipeline` tem o
-// MESMO dealId da primeira, então o `tick()` antigo, quando a consulta
-// dele responder, não seria descartado por uma comparação de dealId (são
-// iguais) e escreveria num container já descartado, além de poder chamar
-// `onSettled` da chamada antiga por engano. Um número que incrementa a
-// CADA chamada de `renderPipeline` (mesmo deal ou não) fecha esse buraco
-// de vez — cada chamada só reconhece a própria geração como válida.
+// MESMO dealId da primeira, então uma atualização antiga, quando a
+// consulta dela responder, não seria descartada por uma comparação de
+// dealId (são iguais) e escreveria num container já descartado, além de
+// poder chamar `onSettled` da chamada antiga por engano. Um número que
+// incrementa a CADA chamada de `renderPipeline` (mesmo deal ou não)
+// fecha esse buraco de vez — cada chamada só reconhece a própria
+// geração como válida.
 let pipelineGeneration = 0;
 
 function stopPipelinePolling() {
-  if (pipelineTimer) { clearInterval(pipelineTimer); pipelineTimer = null; }
+  if (pipelineChannel) { sb.removeChannel(pipelineChannel); pipelineChannel = null; }
+  if (pipelineFallbackTimer) { clearInterval(pipelineFallbackTimer); pipelineFallbackTimer = null; }
+  if (pipelineInitialRetryTimer) { clearInterval(pipelineInitialRetryTimer); pipelineInitialRetryTimer = null; }
   pipelineGeneration++;
 }
 
@@ -624,18 +639,31 @@ function pipelineStageHtml(label, status, timeLabel) {
 async function fetchPipelineState(dealId) {
   const [{ data: deal }, { data: agentRuns }, { data: synthRuns }, { data: outputRows }] = await Promise.all([
     sb.from("deals").select("status,updated_at").eq("id", dealId).single(),
-    sb.from("agent_runs").select("created_at, agent_versions(agents(name))").eq("deal_id", dealId),
-    sb.from("synthesis_runs").select("created_at").eq("deal_id", dealId).order("created_at", { ascending: false }).limit(1),
-    sb.from("outputs").select("created_at, excel_ref, ppt_ref").eq("deal_id", dealId).order("created_at", { ascending: false }).limit(1),
+    sb.from("agent_runs").select("created_at, started_at, agent_versions(agents(name))").eq("deal_id", dealId),
+    sb.from("synthesis_runs").select("created_at, started_at").eq("deal_id", dealId).order("created_at", { ascending: false }).limit(1),
+    sb.from("outputs").select("created_at, started_at, excel_ref, ppt_ref").eq("deal_id", dealId).order("created_at", { ascending: false }).limit(1),
   ]);
   return { deal, agentRuns: agentRuns || [], synth: (synthRuns || [])[0] || null, output: (outputRows || [])[0] || null };
+}
+
+function duracaoDoRegistro(run) {
+  // Achado real em 28/08 (item 2 da lista de melhorias): `started_at`
+  // agora é gravado pelo próprio Python na hora que CADA agente começa
+  // (run_agent.py/generate_outputs.py) — substitui a aproximação antiga
+  // ("assume que todo mundo da matrix começa junto, quando a Extração
+  // termina") por duração real e individual, e finalmente resolve a
+  // Extração, que antes não tinha nenhuma referência de início. Deals
+  // processados ANTES desse campo existir não têm `started_at` — nesses
+  // casos cai pra "há Xh" (não inventa duração que não existe).
+  if (!run) return null;
+  if (!run.started_at) return null;
+  return formatDuration(new Date(run.created_at).getTime() - new Date(run.started_at).getTime());
 }
 
 function renderPipelineHtml(state) {
   const { deal, agentRuns, synth, output } = state;
   const dealFalhou = deal?.status === "error";
   const runOf = (name) => agentRuns.find(r => r.agent_versions?.agents?.name === name) || null;
-  const msOf = (run) => run ? new Date(run.created_at).getTime() : null;
   const statusOf = (name) => {
     if (runOf(name)) return "completed";
     // Não dá pra saber, por agente, se ele falhou especificamente — só
@@ -649,54 +677,38 @@ function renderPipelineHtml(state) {
 
   const extractionRun = runOf("extraction");
   const extractionStatus = extractionRun ? "completed" : statusOf("extraction");
-  const extractionMs = msOf(extractionRun);
   const matrixReady = extractionStatus === "completed";
 
   const matrixStatuses = PIPELINE_MATRIX_AGENTS.map(a => {
     const run = matrixReady ? runOf(a.key) : null;
-    const ms = msOf(run);
-    // Duração real: fim deste agente − fim da Extração (é quando ele
-    // começou a rodar, já que a matrix inteira dispara em paralelo
-    // assim que a Extração termina).
-    const duracao = run && extractionMs != null ? formatDuration(ms - extractionMs) : null;
     return {
       ...a,
       status: matrixReady ? (run ? "completed" : statusOf(a.key)) : "pending",
-      rotuloTempo: duracao || (run ? relativeTime(run.created_at) : ""),
+      rotuloTempo: duracaoDoRegistro(run) || (run ? relativeTime(run.created_at) : ""),
     };
   });
   const matrixDone = matrixStatuses.every(a => a.status === "completed");
-  const ultimoDaMatrixMs = matrixDone
-    ? Math.max(...PIPELINE_MATRIX_AGENTS.map(a => msOf(runOf(a.key))).filter(v => v != null))
-    : null;
 
   const synthStatus = synth ? "completed" : (dealFalhou ? "failed" : (matrixDone ? "running" : "pending"));
-  const synthMs = synth ? new Date(synth.created_at).getTime() : null;
-  const synthDuracao = synth && ultimoDaMatrixMs != null ? formatDuration(synthMs - ultimoDaMatrixMs) : null;
-  const synthTempoLabel = synthDuracao || (synth ? relativeTime(synth.created_at) : "");
+  const synthTempoLabel = duracaoDoRegistro(synth) || (synth ? relativeTime(synth.created_at) : "");
 
   const outputStatus = output?.excel_ref && output?.ppt_ref ? "completed"
     : (dealFalhou ? "failed" : (synthStatus === "completed" ? "running" : "pending"));
-  const outputMs = output ? new Date(output.created_at).getTime() : null;
-  const outputDuracao = output && synthMs != null ? formatDuration(outputMs - synthMs) : null;
-  const outputTempoLabel = outputDuracao || (output ? relativeTime(output.created_at) : "");
+  const outputTempoLabel = duracaoDoRegistro(output) || (output ? relativeTime(output.created_at) : "");
 
   const liveTag = deal?.status === "processing"
     ? `<span class="pipeline-live-tag"><span class="dot"></span>ao vivo</span>` : "";
 
-  // Achado real em 27/08 (Thiago notou "há 1 d" do lado de "23s"/"2m 43s"
-  // e achou estranho, com razão): a Extração é a única etapa sem duração
-  // calculável (não sabemos quando o processamento inteiro começou), e
-  // mostrar "há Xh/d" ali do lado de durações de verdade parecia mais um
-  // tempo igual aos outros — confunde em vez de ajudar. Melhor não
-  // mostrar nada nela do que mostrar uma métrica de tipo diferente
-  // fingindo ser comparável às demais.
+  // A Extração agora TEM duração real (`started_at` gravado por ela
+  // mesma) — deixou de ser a única etapa sem essa informação.
+  const extractionTempoLabel = duracaoDoRegistro(extractionRun) || (extractionRun ? relativeTime(extractionRun.created_at) : "");
+
 
   return `
     <div class="pipeline-wrap">
       <h3>Progresso da análise${liveTag}</h3>
       <div class="pipeline">
-        <div class="pipeline-col">${pipelineStageHtml("Extração", extractionStatus, "")}</div>
+        <div class="pipeline-col">${pipelineStageHtml("Extração", extractionStatus, extractionTempoLabel)}</div>
         <div class="pipeline-connector"></div>
         <div class="pipeline-col">${matrixStatuses.map(a => pipelineStageHtml(a.label, a.status, a.rotuloTempo)).join("")}</div>
         <div class="pipeline-connector"></div>
@@ -715,12 +727,12 @@ async function renderPipeline(dealId, container, onSettled) {
   // chamava `renderPipeline` de novo, que settle de novo... loop infinito,
   // só limitado pela latência de rede — por isso parecia "atualizar tudo a
   // cada segundo"). Só é uma TRANSIÇÃO de verdade (e só nesse caso vale a
-  // pena avisar quem chamou) se em algum tick anterior o status era
-  // "processing" — se já chegou pronto desde o primeiro tick, é só uma
-  // consulta normal, não um "acabou de terminar".
+  // pena avisar quem chamou) se em algum momento anterior o status era
+  // "processing" — se já chegou pronto desde a primeira consulta, é só
+  // uma consulta normal, não um "acabou de terminar".
   let observouProcessando = false;
 
-  async function tick() {
+  async function atualizar() {
     if (pipelineGeneration !== myGeneration) return; // outra chamada mais nova assumiu (mesmo deal ou não) — não pisa em nada
     let state;
     try {
@@ -730,17 +742,14 @@ async function renderPipeline(dealId, container, onSettled) {
       // na consulta ao Supabase (bem comum de acontecer alguma hora) derrubava
       // essa função inteira SEM capturar o erro — como `renderPipeline` é
       // chamado sem `await`/`.catch()` em `openDetail`, isso virava uma
-      // promise rejeitada sem ninguém ouvir, e a linha do `setInterval`
-      // logo abaixo nunca chegava a rodar. Resultado: o painel travava em
-      // branco pra sempre na primeira instabilidade de rede, sem nunca
-      // tentar de novo. Agora um tick que falha só pula essa rodada — o
-      // `setInterval` já criado (ou a ser criado) garante uma nova
-      // tentativa em ${PIPELINE_POLL_MS / 1000}s, e se essa foi a
-      // PRIMEIRA tentativa (painel ainda nunca renderizou nada), mostra
-      // um aviso em vez de deixar em branco sem explicação nenhuma.
+      // promise rejeitada sem ninguém ouvir. Agora uma falha só pula essa
+      // rodada — o Realtime (ou o polling de fallback) garante uma nova
+      // tentativa mais adiante, e se essa foi a PRIMEIRA tentativa (painel
+      // ainda nunca renderizou nada), mostra um aviso em vez de deixar em
+      // branco sem explicação nenhuma.
       console.error("Falha ao atualizar o progresso do deal", dealId, err);
       if (!container.dataset.pipelineRenderedOnce) {
-        container.innerHTML = `<div class="callout warn">Não foi possível carregar o progresso agora. Tentando de novo em alguns segundos...</div>`;
+        container.innerHTML = `<div class="callout warn">Não foi possível carregar o progresso agora. Tentando de novo...</div>`;
       }
       return;
     }
@@ -755,10 +764,56 @@ async function renderPipeline(dealId, container, onSettled) {
     if (observouProcessando && onSettled) onSettled(state.deal?.status);
   }
 
-  await tick();
-  if (pipelineGeneration === myGeneration) {
-    pipelineTimer = setInterval(tick, PIPELINE_POLL_MS);
+  // Debounce curto (achado real em 28/08): mais de uma tabela pode mudar
+  // quase ao mesmo tempo (ex.: um agente grava `agent_runs` e o próximo
+  // já começa) — sem isso, duas notificações do Realtime quase juntas
+  // disparariam duas consultas quase idênticas de volta a volta. Agrupa
+  // em uma só, com uma folga de 300ms.
+  let debounceTimer = null;
+  function atualizarComDebounce() {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(atualizar, 300);
   }
+
+  await atualizar();
+  if (pipelineGeneration !== myGeneration) return; // já resolveu (ou foi cancelada) na primeira consulta — nem assina nada
+
+  if (!container.dataset.pipelineRenderedOnce) {
+    // Achado real em 28/08, revisão da migração pra Realtime: se a
+    // PRIMEIRA consulta falhar (rede instável só na largada) mas o
+    // WebSocket conectar normalmente depois, não sobra nenhum mecanismo
+    // de retentativa — Realtime só avisa sobre mudanças FUTURAS no
+    // banco, não resolve uma falha que já aconteceu na entrada. Enquanto
+    // não conseguir nem o primeiro carregamento com sucesso, tenta nesse
+    // ritmo mais curto (4s) — para sozinho assim que conseguir uma vez.
+    pipelineInitialRetryTimer = setInterval(async () => {
+      if (pipelineGeneration !== myGeneration || container.dataset.pipelineRenderedOnce) {
+        clearInterval(pipelineInitialRetryTimer);
+        pipelineInitialRetryTimer = null;
+        return;
+      }
+      await atualizar();
+    }, 4000);
+  }
+
+  const filtroDeal = `deal_id=eq.${dealId}`;
+  pipelineChannel = sb
+    .channel(`pipeline-${dealId}-${myGeneration}`)
+    .on("postgres_changes", { event: "*", schema: "public", table: "deals", filter: `id=eq.${dealId}` }, atualizarComDebounce)
+    .on("postgres_changes", { event: "*", schema: "public", table: "agent_runs", filter: filtroDeal }, atualizarComDebounce)
+    .on("postgres_changes", { event: "*", schema: "public", table: "synthesis_runs", filter: filtroDeal }, atualizarComDebounce)
+    .on("postgres_changes", { event: "*", schema: "public", table: "outputs", filter: filtroDeal }, atualizarComDebounce)
+    .subscribe((status) => {
+      if (pipelineGeneration !== myGeneration) return;
+      if ((status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") && !pipelineFallbackTimer) {
+        // Realtime não conectou (rede bloqueando WebSocket, etc.) — não
+        // deixa o painel morto: volta pro polling como plano B, só bem
+        // mais espaçado (15s) já que é só rede de segurança, não o
+        // caminho principal.
+        console.warn("Realtime indisponível pro pipeline, caindo pro polling de segurança (15s)");
+        pipelineFallbackTimer = setInterval(atualizar, PIPELINE_FALLBACK_POLL_MS);
+      }
+    });
 }
 
 function openDetail(deal, agentRuns, synth) {
