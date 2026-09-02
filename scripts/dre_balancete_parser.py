@@ -534,6 +534,40 @@ def detect_company_blocks(ws, max_scan_rows: int = 3000) -> list[dict]:
     return blocos
 
 
+def _tem_resultado_utilizavel(wb, candidato: dict) -> bool:
+    """Achado real em 28/08 (deal Equilíbrio Contabilidade) — usado por
+    `detect_dre_sheet` pra desempatar entre abas candidatas quando a
+    melhor por "% de raízes classificadas" não tem NENHUMA linha de
+    resultado/subtotal encontrável (ex.: aba de lançamentos plana que
+    alimenta tabela dinâmica — classifica bem cada linha individual, mas
+    não serve pra viabilidade financeira). Tenta os MESMOS caminhos que
+    `montar_tabela_viabilidade_financeira` tenta de verdade (fino E
+    hierarquia, resultado explícito, EBITDA explícito, ou fallback por
+    diferença) — só checa SE algum deles acharia algo, não calcula o
+    valor final."""
+    try:
+        dre_estruturada = parse_dre_sheet(wb, candidato)
+    except Exception:
+        dre_estruturada = {}
+    if dre_estruturada.get("resultado_liquido") is not None:
+        return True
+    if dre_estruturada.get("despesas_operacionais_total") is not None:
+        return True
+    if _achar_linha_por_padrao(dre_estruturada, _RE_MB_EBITDA_EXPLICITO, "fino") is not None:
+        return True
+    if _achar_linha_por_padrao(dre_estruturada, _RE_MB_RESULTADO, "fino") is not None:
+        return True
+    hier = extrair_hierarquia_dre(wb, candidato)
+    raizes = hier.get("raizes_classificadas") or {}
+    if any(d.get("tipo") == "resultado_calculado" for d in raizes.values()):
+        return True
+    if _achar_linha_por_padrao(raizes, _RE_MB_EBITDA_EXPLICITO, "hierarquia") is not None:
+        return True
+    if _achar_linha_por_padrao(raizes, _RE_MB_RESULTADO, "hierarquia") is not None:
+        return True
+    return False
+
+
 def detect_dre_sheet(wb, min_linhas: int = 3, max_linhas: int = 400):
     """Mesma lógica de detecção de cabeçalho mensal, mas focada em achar
     uma aba de DRE (poucas dezenas de linhas nomeadas, não centenas de
@@ -620,7 +654,21 @@ def detect_dre_sheet(wb, min_linhas: int = 3, max_linhas: int = 400):
         return (pct, total)
 
     candidatas.sort(key=lambda c: _qualidade(c), reverse=True)
-    melhor = candidatas[0]
+    # Achado real em 28/08 (deal Equilíbrio Contabilidade): a candidata
+    # nº1 por "% de raízes classificadas" pode ser uma aba plana de
+    # lançamentos (ex.: "Base de Dados", que alimenta uma tabela
+    # dinâmica) que classifica bem cada linha individual mas NUNCA tem
+    # uma linha de subtotal/resultado — inútil pra viabilidade
+    # financeira mesmo com classificação "boa". Em vez de mudar o
+    # critério de ordenação principal (arriscado — quase quebrou o
+    # Grupo Nacional, cuja DRE de verdade não tem "resultado" bare, só
+    # "RESULTADO APÓS IR/CSLL", achado só pelo caminho fino, não pela
+    # hierarquia), a ordenação original fica INTACTA — só troca de
+    # candidata se a nº1 realmente não render nada utilizável, tentando
+    # a próxima nessa mesma ordem. Se nenhuma candidata tiver resultado
+    # (caso não visto ainda), cai de volta pra nº1 — comportamento
+    # idêntico ao de antes desse fix nesse caso extremo.
+    melhor = next((c for c in candidatas if _tem_resultado_utilizavel(wb, c)), candidatas[0])
     del melhor["linhas_validas"]
     _aplicar_deteccao_multi_empresa(wb, melhor)
     return melhor
@@ -1133,24 +1181,39 @@ def _extrair_hierarquia_por_colunas(ws, header_row: int, meses_col: dict, coluna
     if not linhas_cruas:
         return {"raizes_classificadas": {}, "raizes_ambiguas": [], "total_linhas_lidas": 0, "hierarquia_confiavel": True}
 
-    # Forward-fill por coluna, na ordem em que as linhas aparecem.
-    ultimo_valor = {c: None for c in colunas_hier}
-    for l in linhas_cruas:
-        for c in colunas_hier:
-            if l["textos"][c] is not None:
-                ultimo_valor[c] = l["textos"][c]
-            l["textos"][c] = ultimo_valor[c]
-        # reset do forward-fill não é necessário entre blocos — cada
-        # coluna carrega seu último valor visto até a próxima mudança,
-        # que é exatamente o comportamento de planilha com célula
-        # mesclada visualmente (mesma lógica que Excel usa pra exibir).
-        ultimo_valor = {c: l["textos"][c] for c in colunas_hier}
-
-    # Cardinalidade por coluna (após forward-fill) — decide ordem raiz->detalhe.
+    # Cardinalidade por coluna, calculada nos textos CRUS (sem fill) — o
+    # conjunto de valores distintos é o mesmo antes ou depois do
+    # forward-fill (preencher só repete o mesmo valor em mais linhas, não
+    # cria valor novo), então decidir raiz/detalhe aqui, antes de
+    # preencher, não muda o resultado dessa decisão — mas permite o fix
+    # abaixo, que PRECISA saber qual coluna é a raiz antes de preencher.
     cardinalidade = {c: len({l["textos"][c] for l in linhas_cruas if l["textos"][c] is not None}) for c in colunas_hier}
     colunas_por_generalidade = sorted(colunas_hier, key=lambda c: cardinalidade[c])
     col_raiz = colunas_por_generalidade[0]
     col_detalhe = colunas_por_generalidade[-1]
+
+    # Forward-fill por coluna, na ordem em que as linhas aparecem.
+    # Achado real em 28/08 (deal Grupo Roma — PDF de auditoria financeira
+    # detalhado do Thiago): a linha que DEFINE uma categoria nova (ex.:
+    # "02. Impostos" na coluna raiz) geralmente vem com a coluna de
+    # DETALHE vazia (ainda não tem filha nenhuma) — sem reset, o forward-
+    # fill herdava o ÚLTIMO detalhe da categoria ANTERIOR ("Serviços
+    # Esporádicos", sobrando da seção de Receita) pra dentro dessa linha,
+    # fazendo ela parecer uma "filha" comum em vez da linha que define a
+    # raiz — isso quebrava o fix de dupla contagem logo abaixo
+    # (que depende de reconhecer corretamente qual linha é "a própria
+    # raiz"). Regra: sempre que a RAIZ tiver um valor próprio nesta linha
+    # (não herdado), o detalhe herdado da categoria anterior é descartado
+    # — pertence a outra categoria, não faz sentido carregar pra cá.
+    ultimo_valor = {c: None for c in colunas_hier}
+    for l in linhas_cruas:
+        if l["textos"][col_raiz] is not None:
+            ultimo_valor[col_detalhe] = None
+        for c in colunas_hier:
+            if l["textos"][c] is not None:
+                ultimo_valor[c] = l["textos"][c]
+            l["textos"][c] = ultimo_valor[c]
+        ultimo_valor = {c: l["textos"][c] for c in colunas_hier}
 
     raizes_dict: dict[str, dict] = {}
     # Achado real em 28/08 (deal Grupo Roma — PDF de auditoria financeira
@@ -1333,7 +1396,7 @@ def calcular_resultado_de_hierarquia(hierarquia: dict) -> dict:
     }
 
 
-_RE_MB_RECEITA_BRUTA = re.compile(r"(?i)^\W*receitas?\W*$|receita(?!.*l[íi]quida).*(bruta|serv|venda|faturamento)")
+_RE_MB_RECEITA_BRUTA = re.compile(r"(?i)^[\d\s.\-()=]*receitas?[\d\s.\-()=]*$|receita(?!.*l[íi]quida).*(bruta|serv|venda|faturamento)")
 # Defesa extra (27/08, mesmo achado do fix em DRE_CATEGORIAS acima):
 # sem o "(?!.*l[íi]quida)", esta regex também bate "Receita Líquida de
 # Serviços". Hoje `_achar_linha_por_padrao` pega candidatos[0] (primeira
@@ -1344,10 +1407,37 @@ _RE_MB_RECEITA_BRUTA = re.compile(r"(?i)^\W*receitas?\W*$|receita(?!.*l[íi]quid
 # em outra ordem quebraria isso silenciosamente); a exclusão explícita
 # remove essa dependência.
 _RE_MB_RECEITA_LIQUIDA = re.compile(r"(?i)receita.*l[íi]quida")
-_RE_MB_DESPESA_PESSOAL = re.compile(r"(?i)despesa.*pessoal|folha[\s_]*de[\s_]*pagamento|custo.*folha|\bfolha\b|\brh\b")
+_RE_MB_DESPESA_PESSOAL = re.compile(r"(?i)despesa.*pessoal|folha[\s_]*de[\s_]*pagamento|custo.*folha|\bfolha\b|\brh\b|\bpessoal\b")
+# "\bpessoal\b" (achado real em 28/08, deal BWA 360 — DRE real usa
+# "(-) PESSOAL" sozinho, sem "despesa"/"folha" na frente; a regex antiga
+# exigia um desses prefixos e voltava `folha_pagamento: null` mesmo com
+# o dado presente e correto na fonte).
 _RE_MB_CUSTO_SISTEMAS = re.compile(r"(?i)custo.*sistemas?(?!.*financeiro)|servi[çc]os?[\s_]*de[\s_]*sistema|\bsistemas?\b(?!.*financeiro)")
-_RE_MB_DEDUCAO_RECEITA = re.compile(r"(?i)dedu[çc][ãa]o.*receita|impostos?[\s_]*(s[/.]?[\s_]*|sobre[\s_]+)(venda|servi[çc]o|faturamento|receita)|pis.*cofins|^\W*dedu[çc][õo]es?\W*$")
-_RE_MB_RESULTADO = re.compile(r"(?i)^\W*resultado\W*$|resultado[\s_]+operacional|resultado.*l[íi]quido|lucro.*l[íi]quido")
+_RE_MB_DEDUCAO_RECEITA = re.compile(r"(?i)dedu[çc][ãa]?[oõ]e?s?.*receita|impostos?[\s_]*(s[/.]?[\s_]*|sobre[\s_]+(?:os?|as?)?[\s_]*)(venda|servi[çc]o|faturamento|receita)|pis.*cofins|^[\d\s.\-()=]*(dedu[çc][õo]es?|impostos?)[\d\s.\-()=]*$")
+# Segunda rodada de achado no Grupo Roma (28/08): mesmo depois do fix
+# acima, "Impostos" ainda saía errado — porque o rótulo real do arquivo é
+# "02. Impostos" (prefixo numerado de categoria), e a âncora de match
+# exato usava `\W*` no início, que NÃO pula dígitos ("0"/"2" são \w, não
+# \W) — "02. Impostos" nunca batia, e o código ia parar sozinho na
+# categoria seguinte por coincidência de substring. Toda âncora de match
+# exato desta seção (Deduções/Impostos, EBITDA, Resultado, D&A, Receita
+# Bruta) foi trocada de `\W*` pra `[\d\s.\-()=]*`, que tolera prefixo
+# numerado ("01.", "02.") além de pontuação — sem isso, qualquer DRE que
+# numere categorias (comum) quebrava essas âncoras.
+# Achado real em 28/08 (deal BWA 360 — DRE real usa "(-) IMPOSTOS" sozinho,
+# sem "sobre venda/serviço" na frente; a regex antiga exigia esse
+# qualificador e voltava `impostos: 0` mesmo com o dado presente e
+# correto). Junto: mesmo achado de plural que já apareceu hoje no D&A —
+# "dedu[çc][ãa]o" só pegava singular ("Dedução"), não "Deduções" (o
+# arquivo do BWA 360 nem usa essa palavra, mas o Grupo Roma e outros já
+# testados hoje têm "Deduções de Receita" no plural).
+_RE_MB_EBITDA_EXPLICITO = re.compile(r"(?i)^[\d\s.\-()=]*ebitda[\d\s.\-()=]*$")
+# Achado real em 28/08 (deal BWA 360) — âncora exata (só bate "EBITDA"
+# isolado, tipo "(=) EBITDA"). Não confundir com "Margem EBITDA %" (já
+# filtrado por `_achar_linha_por_padrao` — nunca aceita linha "%") nem
+# com o EBITDA Bridge que o agente `financial_analysis` calcula por
+# conta própria (isso é outra fonte, outro código, ver run_agent.py).
+_RE_MB_RESULTADO = re.compile(r"(?i)^[\d\s.\-()=]*resultado[\d\s.\-()=]*$|resultado[\s_]+operacional|resultado.*l[íi]quido|lucro.*l[íi]quido")
 # "^\W*resultado\W*$" (achado real em 27/08, CSF Hotelaria — restaurado
 # aqui após sumir numa sobrescrita de upload) — rótulo "RESULTADO"
 # sozinho é a linha de resultado final dessa DRE, com valores em R$
@@ -1627,7 +1717,7 @@ def montar_mini_dre(dre_estruturada: dict | None, hierarquia: dict | None, perio
     return None
 
 
-_RE_MB_DA = re.compile(r"(?i)deprecia|amortiza|^\W*d\s*&\s*a\W*$")
+_RE_MB_DA = re.compile(r"(?i)deprecia|amortiza|^[\d\s.\-()=]*d\s*&\s*a[\d\s.\-()=]*$")
 # Simplificado pro radical só (achado real em 28/08, Grupo Nacional — PDF
 # de auditoria do Thiago): a versão anterior exigia terminação exata
 # "-ção"/"-cao" e não reconhecia plural ("Depreciações"/"DEPRECIACOES",
@@ -1684,6 +1774,19 @@ def montar_tabela_viabilidade_financeira(dre_estruturada: dict | None, hierarqui
                 # "resultado_calculado" na hierarquia é qualquer linha com
                 # sinal "=" — o rótulo real não chega até aqui pra
                 # classificar com confiança, mantém o default otimista.
+        if resultado is None:
+            # Achado real em 28/08 (deal BWA 360): a DRE tem uma linha
+            # "(=) EBITDA" pronta e explícita — o sinal mais direto que
+            # existe, mais confiável que qualquer aproximação por Lucro
+            # Líquido ou Resultado Operacional. Prioridade MÁXIMA: se a
+            # fonte já rotula uma linha como EBITDA, usa ela, sem tentar
+            # adivinhar por outro caminho. R$11,6M (Lucro Líquido, o que
+            # o código pegava antes) e R$15,0M (EBITDA, o que a própria
+            # DRE já calculava) são números diferentes e válidos — mas só
+            # um deles é o que a fonte chama de EBITDA de verdade.
+            resultado = _achar_linha_por_padrao(fonte, _RE_MB_EBITDA_EXPLICITO, formato)
+            if resultado is not None:
+                resultado_tipo = "resultado_operacional"  # rótulo "Lucro Operacional"/"Margem EBITDA" já é honesto aqui
         if resultado is None:
             resultado = fonte.get("resultado_liquido")
             if resultado is not None:
