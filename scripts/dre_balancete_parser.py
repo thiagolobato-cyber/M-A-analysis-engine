@@ -1153,6 +1153,24 @@ def _extrair_hierarquia_por_colunas(ws, header_row: int, meses_col: dict, coluna
     col_detalhe = colunas_por_generalidade[-1]
 
     raizes_dict: dict[str, dict] = {}
+    # Achado real em 28/08 (deal Grupo Roma — PDF de auditoria financeira
+    # detalhado do Thiago): quando a linha que DEFINE a raiz (a primeira
+    # ocorrência, sem detalhe ainda — ex.: "01. Receita Bruta de Vendas"
+    # sozinha na coluna A) JÁ TEM valor próprio, esse valor é o subtotal
+    # PRONTO da categoria — e as linhas-filha que vêm depois (mesma raiz
+    # via forward-fill, cada uma com seu detalhe) são só o detalhamento
+    # daquele MESMO total, não números adicionais. O código antigo somava
+    # os dois: a linha-pai inteira de novo em cima da soma das filhas —
+    # Receita Bruta real de R$5.361.667 saía como R$10.723.335 (2×),
+    # exatamente o erro que o PDF flagrou. Regra: a primeira linha "sem
+    # detalhe" que já traz valor é tratada como o total definitivo da
+    # raiz; linhas-filha que vierem depois entram só como rótulo em
+    # `detalhes`, nunca somadas por cima. Se a raiz nunca tiver uma linha
+    # própria com valor (categoria é só um cabeçalho, dado real mora
+    # inteiramente nas filhas — o caso mais comum em outros arquivos já
+    # testados), o comportamento de somar as filhas continua idêntico a
+    # antes — este fix não muda nada pra esse formato.
+    raizes_com_total_proprio: set[str] = set()
     for l in linhas_cruas:
         raiz = l["textos"][col_raiz]
         detalhe = l["textos"][col_detalhe]
@@ -1160,8 +1178,14 @@ def _extrair_hierarquia_por_colunas(ws, header_row: int, meses_col: dict, coluna
             continue
         if raiz not in raizes_dict:
             raizes_dict[raiz] = {"rotulo": raiz, "valores": {}, "detalhes": []}
-        for k, v in l["valores"].items():
-            raizes_dict[raiz]["valores"][k] = raizes_dict[raiz]["valores"].get(k, 0) + v
+        eh_linha_propria_da_raiz = detalhe is None or detalhe == raiz
+        if eh_linha_propria_da_raiz and l["valores"]:
+            for k, v in l["valores"].items():
+                raizes_dict[raiz]["valores"][k] = raizes_dict[raiz]["valores"].get(k, 0) + v
+            raizes_com_total_proprio.add(raiz)
+        elif raiz not in raizes_com_total_proprio:
+            for k, v in l["valores"].items():
+                raizes_dict[raiz]["valores"][k] = raizes_dict[raiz]["valores"].get(k, 0) + v
         if detalhe and detalhe != raiz:
             raizes_dict[raiz]["detalhes"].append(detalhe)
 
@@ -1323,7 +1347,14 @@ _RE_MB_RECEITA_LIQUIDA = re.compile(r"(?i)receita.*l[íi]quida")
 _RE_MB_DESPESA_PESSOAL = re.compile(r"(?i)despesa.*pessoal|folha[\s_]*de[\s_]*pagamento|custo.*folha|\bfolha\b|\brh\b")
 _RE_MB_CUSTO_SISTEMAS = re.compile(r"(?i)custo.*sistemas?(?!.*financeiro)|servi[çc]os?[\s_]*de[\s_]*sistema|\bsistemas?\b(?!.*financeiro)")
 _RE_MB_DEDUCAO_RECEITA = re.compile(r"(?i)dedu[çc][ãa]o.*receita|impostos?[\s_]*(s[/.]?[\s_]*|sobre[\s_]+)(venda|servi[çc]o|faturamento|receita)|pis.*cofins|^\W*dedu[çc][õo]es?\W*$")
-_RE_MB_RESULTADO = re.compile(r"(?i)resultado[\s_]+operacional|resultado.*l[íi]quido|lucro.*l[íi]quido")
+_RE_MB_RESULTADO = re.compile(r"(?i)^\W*resultado\W*$|resultado[\s_]+operacional|resultado.*l[íi]quido|lucro.*l[íi]quido")
+# "^\W*resultado\W*$" (achado real em 27/08, CSF Hotelaria — restaurado
+# aqui após sumir numa sobrescrita de upload) — rótulo "RESULTADO"
+# sozinho é a linha de resultado final dessa DRE, com valores em R$
+# corretos, mas não batia em nenhuma das 3 alternativas antigas. Âncora
+# exata (só bate "RESULTADO" isolado, não "Resultado Financeiro Líquido"
+# nem "Resultado de Equivalência Patrimonial", que têm palavra extra e
+# são sub-linhas, não o resultado final).
 # Marcador de linha NÃO-operacional — usado só como DESEMPATE quando
 # múltiplas linhas batem o mesmo padrão (achado real no Plannea: "Folha
 # Operacional" E "Folha Diretoria" batem "folha", mas só a primeira é o
@@ -1355,8 +1386,21 @@ def _achar_linha_por_padrao(fonte: dict, padrao: re.Pattern, formato: str) -> di
     a margem de ~24% em vez dos ~35% esperados). Quando houver
     candidatos "não-operacionais" (diretoria/sócio/administrativo)
     misturados com outros, prefere os que NÃO são — só usa um
-    não-operacional se for a ÚNICA opção disponível."""
-    candidatos = [(rotulo, dado) for rotulo, dado in fonte.items() if padrao.search(rotulo)]
+    não-operacional se for a ÚNICA opção disponível.
+
+    FILTRO DE LINHAS "%" (achado real em 27/08, CSF Hotelaria — este
+    fix tinha sido perdido numa sobrescrita de upload e voltou a
+    reaparecer em 28/08 testando o Grupo Roma; restaurado de vez aqui):
+    sem essa proteção, `candidatos` podia conter uma linha de PERCENTUAL
+    (ex.: "Margem Bruta %", "Lucro Líquido %") que por acaso batia o
+    texto do padrão — usar um percentual como se fosse R$ é um erro de
+    ordens de grandeza (0,55 em vez de R$550.000), não um erro de
+    arredondamento. Foi exatamente isso: "LUCRO LÍQUIDO %" sendo usado
+    como "Lucro Operacional (R$)". Filtra ANTES de qualquer desempate —
+    uma linha "%" nunca é candidata válida pra nenhum dos campos que esta
+    função busca (todos são valores monetários por definição)."""
+    candidatos = [(rotulo, dado) for rotulo, dado in fonte.items()
+                  if padrao.search(rotulo) and "%" not in rotulo]
     if not candidatos:
         return None
     subtotais = [c for c in candidatos if re.search(r"(?i)subtotal|total\s*geral", c[0])]
@@ -1366,6 +1410,39 @@ def _achar_linha_por_padrao(fonte: dict, padrao: re.Pattern, formato: str) -> di
         operacionais = [c for c in candidatos if not _RE_MB_NAO_OPERACIONAL.search(c[0])]
         rotulo, dado = (operacionais or candidatos)[0]
     return dado["valores"] if formato == "hierarquia" else dado
+
+
+def _achar_rotulo_por_padrao(fonte: dict, padrao: re.Pattern, formato: str) -> str | None:
+    """Mesma busca/desempate de `_achar_linha_por_padrao` (inclusive o
+    filtro de linhas "%" — ver lá), mas devolve o RÓTULO vencedor em vez
+    dos valores — usado quando quem chama precisa saber O QUE foi achado,
+    não só o número (ex.: classificar se a linha de "resultado"
+    encontrada é Lucro Líquido ou Resultado Operacional — ver
+    `_classificar_tipo_resultado` logo abaixo)."""
+    candidatos = [(rotulo, dado) for rotulo, dado in fonte.items()
+                  if padrao.search(rotulo) and "%" not in rotulo]
+    if not candidatos:
+        return None
+    subtotais = [c for c in candidatos if re.search(r"(?i)subtotal|total\s*geral", c[0])]
+    if subtotais:
+        return subtotais[0][0]
+    operacionais = [c for c in candidatos if not _RE_MB_NAO_OPERACIONAL.search(c[0])]
+    return (operacionais or candidatos)[0][0]
+
+
+_RE_ROTULO_LUCRO_LIQUIDO = re.compile(r"(?i)lucro.*l[íi]quido|resultado.*l[íi]quido")
+
+
+def _classificar_tipo_resultado(rotulo: str | None) -> str:
+    """Classifica se o rótulo vencedor pra 'resultado' é Lucro Líquido ou
+    Resultado Operacional — usado por `montar_tabela_viabilidade_financeira`
+    pra rotular o Excel/PPT honestamente ('Margem Líquida' vs 'Margem
+    EBITDA') em vez de sempre assumir EBITDA (achado real em 27/08, deal
+    Irko — o PARECER DO TIME já dizia 'margem líquida' corretamente, mas
+    o Excel/PPT insistiam em 'Margem EBITDA' pro mesmo número)."""
+    if rotulo and _RE_ROTULO_LUCRO_LIQUIDO.search(rotulo):
+        return "lucro_liquido"
+    return "resultado_operacional"
 
 
 def extrair_margem_bruta_de_dre(dre_estruturada: dict | None, hierarquia: dict | None, regime_tributario: str | None) -> dict | None:
@@ -1550,7 +1627,14 @@ def montar_mini_dre(dre_estruturada: dict | None, hierarquia: dict | None, perio
     return None
 
 
-_RE_MB_DA = re.compile(r"(?i)deprecia[çc][ãa]o|amortiza[çc][ãa]o|^\W*d\s*&\s*a\W*$")
+_RE_MB_DA = re.compile(r"(?i)deprecia|amortiza|^\W*d\s*&\s*a\W*$")
+# Simplificado pro radical só (achado real em 28/08, Grupo Nacional — PDF
+# de auditoria do Thiago): a versão anterior exigia terminação exata
+# "-ção"/"-cao" e não reconhecia plural ("Depreciações"/"DEPRECIACOES",
+# sem acento nem cedilha no arquivo real do Grupo Nacional, linha 28 da
+# DRE). "deprecia"/"amortiza" sozinhos como radical não têm risco
+# plausível de falso positivo em rótulo de DRE — mais simples e mais
+# robusto que tentar cobrir cada variação de sufixo.
 
 
 def montar_tabela_viabilidade_financeira(dre_estruturada: dict | None, hierarquia: dict | None, periodos_rotulos: list | None = None) -> dict | None:
@@ -1589,6 +1673,7 @@ def montar_tabela_viabilidade_financeira(dre_estruturada: dict | None, hierarqui
         d_a = _achar_linha_por_padrao(fonte, _RE_MB_DA, formato)
 
         resultado = None
+        resultado_tipo = "resultado_operacional"
         if formato == "hierarquia" and raizes_classificadas:
             resultados_calc = [
                 dados["valores"] for rotulo, dados in raizes_classificadas.items()
@@ -1596,16 +1681,30 @@ def montar_tabela_viabilidade_financeira(dre_estruturada: dict | None, hierarqui
             ]
             if resultados_calc:
                 resultado = resultados_calc[-1]
+                # "resultado_calculado" na hierarquia é qualquer linha com
+                # sinal "=" — o rótulo real não chega até aqui pra
+                # classificar com confiança, mantém o default otimista.
         if resultado is None:
             resultado = fonte.get("resultado_liquido")
+            if resultado is not None:
+                resultado_tipo = "lucro_liquido"  # categoria "resultado_liquido" já diz o tipo
         if resultado is None:
             resultado = _achar_linha_por_padrao(fonte, _RE_MB_RESULTADO, formato)
+            if resultado is not None:
+                # Classifica pelo RÓTULO que realmente venceu — "Lucro
+                # Líquido" e "Resultado Operacional" não são a mesma
+                # coisa, e o Excel/PPT deve rotular honestamente qual dos
+                # dois foi realmente encontrado (ver `generate_outputs.py`,
+                # `_rotulos_linha_resultado`).
+                rotulo_vencedor = _achar_rotulo_por_padrao(fonte, _RE_MB_RESULTADO, formato)
+                resultado_tipo = _classificar_tipo_resultado(rotulo_vencedor)
         despesas_op_total = fonte.get("despesas_operacionais_total") if formato == "fino" else None
         if resultado is None and despesas_op_total:
             resultado = {
                 periodo: receita.get(periodo, 0) - abs(deducao.get(periodo, 0) if deducao else 0) - abs(v)
                 for periodo, v in despesas_op_total.items()
             }
+            resultado_tipo = "resultado_operacional"
         if resultado is None:
             continue
 
@@ -1644,7 +1743,8 @@ def montar_tabela_viabilidade_financeira(dre_estruturada: dict | None, hierarqui
             })
 
         if linhas:
-            return {"linhas": linhas, "fonte": formato, "d_a_reconhecido": d_a is not None}
+            return {"linhas": linhas, "fonte": formato, "d_a_reconhecido": d_a is not None,
+                    "resultado_tipo": resultado_tipo}
     return None
 
 
