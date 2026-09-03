@@ -475,7 +475,41 @@ def excel_to_text(file_bytes: bytes, filename: str) -> tuple[str, list, dict, di
                         ainda_ambiguas.append(r)
                 hierarquia["raizes_ambiguas"] = ainda_ambiguas
 
+                # Achado real em 28/08 (deal Fragatas/Tarchiani — Thiago
+                # reportou dois números de EBITDA diferentes no mesmo
+                # Excel: "Lucro Líquido" R$247.309,57 correto, "EBITDA
+                # Reportado" R$1.129.793,63 errado, no MESMO arquivo).
+                # Causa: dois cálculos INDEPENDENTES sobre a mesma
+                # hierarquia — `calcular_resultado_de_hierarquia` (bottom-
+                # up: soma tudo que é "receita" menos tudo que é
+                # "despesa") e `montar_tabela_viabilidade_financeira`
+                # (busca a linha de resultado específica da fonte — a
+                # mesma lógica testada e comprovada hoje em 8 deals
+                # reais). Podiam concordar (Grupo Roma) ou divergir
+                # (Fragatas/Tarchiani, quando categorização fica
+                # incompleta) sem nenhum aviso — o agente via os dois
+                # números e não tinha como saber qual confiar. Elimina a
+                # duplicidade na raiz: usa o resultado de
+                # `tabela_viabilidade_financeira` como valor autoritativo
+                # sempre que disponível — as duas células do Excel nunca
+                # mais podem discordar, porque passam a vir da mesma
+                # conta.
                 resultado_calc = calcular_resultado_de_hierarquia(hierarquia)
+                periodos_rotulos_reconciliacao = _rotulos_legiveis_periodo(dre_deteccao["meses_para_coluna"])
+                tabela_viab_reconciliacao = montar_tabela_viabilidade_financeira(None, hierarquia, periodos_rotulos_reconciliacao)
+                if tabela_viab_reconciliacao and tabela_viab_reconciliacao.get("linhas"):
+                    soma_resultado_reconciliado = sum(
+                        l.get("lucro_operacional") or 0 for l in tabela_viab_reconciliacao["linhas"]
+                    )
+                    resultado_calc["ebitda_aproximado"] = round(soma_resultado_reconciliado, 2)
+                    resultado_calc["resultado_operacional_total"] = round(soma_resultado_reconciliado, 2)
+                    resultado_calc["fonte"] = "tabela_viabilidade_financeira_v2"
+                    resultado_calc["nota_reconciliacao"] = (
+                        "Valor reconciliado com tabela_viabilidade_financeira em 28/08 "
+                        "— substitui o cálculo bottom-up antigo (campo mantido só por "
+                        "compatibilidade retroativa), que podia divergir silenciosamente "
+                        "deste mesmo número em outra célula do Excel/PPT."
+                    )
                 dre_hierarquia_info = {"hierarquia": hierarquia, "resultado": resultado_calc}
                 parts.append(format_hierarquia_dre(hierarquia, resultado_calc))
 
@@ -825,29 +859,38 @@ def run_extraction(deal_id: str):
                 "todos_periodos": margem_de_dre["margem_bruta_pct_por_periodo"],
             }
         else:
-            # BUG REAL CORRIGIDO EM 26/08: esta variável só existia dentro
-            # deste branch, mas era referenciada mais abaixo (raw_extracted)
-            # de forma incondicional — quebrava com NameError toda vez que a
-            # DRE fosse a fonte usada (branch acima), que passou a ser o
-            # caminho mais comum depois da decisão "quem manda é a DRE".
-            margem_formulario = calcular_margem_bruta(
-                mapeado["faturamento_mensal"], mapeado["folha_informada"], mapeado["custo_sistemas"],
-                mapeado["regime_tributario"], mapeado["rbt12"],
-            )
-            margem_bruta_pct_final = margem_formulario["margem_bruta_pct"]
-            custo_folha_pct = (
-                100 * mapeado["folha_informada"] / mapeado["faturamento_mensal"]
-                if mapeado["faturamento_mensal"] else None
-            )
+            # Achado real em 28/08 (deal Fragatas/Tarchiani — o time subiu
+            # PDF, que o motor não sabe ler, e caiu pro formulário sem
+            # avisar suficientemente alto: EBITDA de R$1,13M baseado em
+            # formulário divergindo 11,2x do real da DRE). Decisão do
+            # Thiago no mesmo dia: "desconsiderar SEMPRE o formulário,
+            # SEMPRE usar DRE" pra esses números — substitui a decisão
+            # anterior (26/08, "DRE > formulário, cai pro formulário se
+            # a DRE não tiver os componentes"). Não cai mais pra
+            # formulário nunca — se a DRE não tem os componentes
+            # necessários, o dado fica None (explicitamente ausente,
+            # não estimado), e `avaliar_viabilidade_financeira` já sabe
+            # tratar None como "Dados insuficientes" em vez de travar ou
+            # inventar um número. Isso é bloqueio, não aproximação.
+            margem_bruta_pct_final = None
+            custo_folha_pct = None
             motivo_formulario = (
-                "Nenhuma DRE disponível nesse deal."
+                "Nenhuma DRE disponível nesse deal — e por decisão do Thiago em "
+                "28/08, formulário NUNCA é usado como fonte pra Margem Bruta/Custo "
+                "Folha/Custo Sistemas, nem como aproximação. Dado fica ausente até "
+                "uma DRE legível ser fornecida."
                 if not (code_computed_dre or code_computed_dre_hierarquia)
                 else "DRE disponível, mas sem os componentes necessários reconhecíveis "
-                     "(Receita/Despesa com Pessoal/Custo Sistemas) — caiu pro formulário."
+                     "(Receita/Despesa com Pessoal/Custo Sistemas) — E POR DECISÃO DO "
+                     "THIAGO EM 28/08, formulário não é mais usado como fallback pra "
+                     "esses números (mesmo que a DRE seja um PDF que o motor não saiba "
+                     "ler ainda). Isso é um BLOQUEIO: peça uma DRE em Excel legível, "
+                     "não confie no formulário pra margem/custo folha/custo sistemas "
+                     "deste deal."
             )
             margem_bruta_calculada = {
-                **margem_formulario,
-                "fonte": "formulario",
+                "margem_bruta_pct": None,
+                "fonte": "bloqueado_sem_dre_confiavel",
                 "motivo": motivo_formulario,
             }
 
@@ -894,10 +937,10 @@ def run_extraction(deal_id: str):
         if custo_sistemas_pct_dre is not None:
             custo_sistemas_pct = custo_sistemas_pct_dre
         else:
-            custo_sistemas_pct = (
-                100 * mapeado["custo_sistemas"] / mapeado["faturamento_mensal"]
-                if mapeado["faturamento_mensal"] else None
-            )
+            # Mesma decisão do Thiago em 28/08 aplicada aqui: sem DRE
+            # legível pro Custo de Sistemas, o dado fica None — não cai
+            # mais pro formulário como aproximação.
+            custo_sistemas_pct = None
         bloco_b = avaliar_complexidade_operacional(
             custo_sistemas_pct, mapeado["localizacao_fora_grande_sp"],
             mapeado["numero_clientes"], mapeado["numero_colaboradores"],
