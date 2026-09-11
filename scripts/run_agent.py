@@ -498,18 +498,52 @@ def excel_to_text(file_bytes: bytes, filename: str) -> tuple[str, list, dict, di
                 periodos_rotulos_reconciliacao = _rotulos_legiveis_periodo(dre_deteccao["meses_para_coluna"])
                 tabela_viab_reconciliacao = montar_tabela_viabilidade_financeira(None, hierarquia, periodos_rotulos_reconciliacao)
                 if tabela_viab_reconciliacao and tabela_viab_reconciliacao.get("linhas"):
-                    soma_resultado_reconciliado = sum(
-                        l.get("lucro_operacional") or 0 for l in tabela_viab_reconciliacao["linhas"]
-                    )
-                    resultado_calc["ebitda_aproximado"] = round(soma_resultado_reconciliado, 2)
-                    resultado_calc["resultado_operacional_total"] = round(soma_resultado_reconciliado, 2)
-                    resultado_calc["fonte"] = "tabela_viabilidade_financeira_v2"
-                    resultado_calc["nota_reconciliacao"] = (
-                        "Valor reconciliado com tabela_viabilidade_financeira em 28/08 "
-                        "— substitui o cálculo bottom-up antigo (campo mantido só por "
-                        "compatibilidade retroativa), que podia divergir silenciosamente "
-                        "deste mesmo número em outra célula do Excel/PPT."
-                    )
+                    if dre_deteccao.get("granularidade") == "mensal":
+                        # Meses sequenciais do MESMO ano — somar os 12
+                        # períodos dá o total anual, que é exatamente o
+                        # número que faz sentido reportar (validado hoje
+                        # em Grupo Roma e Fragatas/Tarchiani).
+                        soma_resultado_reconciliado = sum(
+                            l.get("lucro_operacional") or 0 for l in tabela_viab_reconciliacao["linhas"]
+                        )
+                        resultado_calc["ebitda_aproximado"] = round(soma_resultado_reconciliado, 2)
+                        resultado_calc["resultado_operacional_total"] = round(soma_resultado_reconciliado, 2)
+                        resultado_calc["fonte"] = "tabela_viabilidade_financeira_v2"
+                        resultado_calc["nota_reconciliacao"] = (
+                            "Valor reconciliado com tabela_viabilidade_financeira em 28/08 "
+                            "— substitui o cálculo bottom-up antigo (campo mantido só por "
+                            "compatibilidade retroativa), que podia divergir silenciosamente "
+                            "deste mesmo número em outra célula do Excel/PPT."
+                        )
+                    else:
+                        # Achado real em 28/08 (deal SKZ Oberle — o fix
+                        # acima, testado só com meses sequenciais de UM
+                        # ano, quebrou aqui: colunas são ANOS/CENÁRIOS
+                        # COMPARATIVOS diferentes (2023, 2024, "2025 YTD
+                        # Out", "Est. 2025", "Proj. 2026") — somar os 5
+                        # "períodos" juntos não representa nada real
+                        # (mistura ano fechado + ano em andamento +
+                        # estimativa + projeção futura), e foi exatamente
+                        # isso que produziu o R$23.602.266,25 sem sentido
+                        # que apareceu como red flag no relatório do
+                        # Thiago. Pra granularidade "anual" (colunas
+                        # comparativas, não meses de um único ano), NÃO
+                        # inventa um agregado — deixa `ebitda_aproximado`
+                        # ausente e aponta pra `linhas_resultado_da_fonte`
+                        # (já existe abaixo), que tem cada período
+                        # rotulado corretamente pro agente escolher o
+                        # certo, em vez de confiar numa soma sem
+                        # significado.
+                        resultado_calc["ebitda_aproximado"] = None
+                        resultado_calc["resultado_operacional_total"] = None
+                        resultado_calc["fonte"] = "periodos_comparativos_ver_linhas_da_fonte"
+                        resultado_calc["nota_reconciliacao"] = (
+                            "Granularidade 'anual' com múltiplas colunas comparativas "
+                            "(anos/cenários diferentes, não meses do mesmo ano) — nenhum "
+                            "agregado único faz sentido aqui. Use os valores por período em "
+                            "`linhas_resultado_da_fonte` (cada um rotulado com o período "
+                            "correto), não uma soma entre eles."
+                        )
                 dre_hierarquia_info = {"hierarquia": hierarquia, "resultado": resultado_calc}
                 parts.append(format_hierarquia_dre(hierarquia, resultado_calc))
 
