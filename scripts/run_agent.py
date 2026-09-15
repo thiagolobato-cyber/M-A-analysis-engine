@@ -1198,8 +1198,22 @@ def _extract_json(text: str) -> dict | None:
     return None
 
 
-def compute_input_hash(deal_id: str, agent_version_id: str, checksum: str) -> str:
-    raw = f"{deal_id}:{agent_version_id}:{checksum}"
+def compute_input_hash(deal_id: str, agent_version_id: str, checksum: str, codigo_versao: str) -> str:
+    # Achado real em 28/08 — Thiago reportou deals JÁ CORRIGIDOS (Irko,
+    # Fragatas/Tarchiani, BWA 360) continuando com o bug antigo mesmo
+    # depois do código estar corrigido no GitHub. Causa raiz: o hash de
+    # idempotência só olhava deal+versão do PROMPT de IA+arquivo — nunca
+    # a versão do CÓDIGO Python. Corrigir um bug em `run_agent.py`/
+    # `dre_balancete_parser.py` não muda nem o prompt nem o arquivo, e
+    # "Reprocessar" no mesmo deal caía direto na idempotência: "já rodei
+    # isso antes" — sem nunca chegar a executar o código corrigido.
+    # `GITHUB_SHA` (o commit que está rodando, disponível automaticamente
+    # em todo workflow do GitHub Actions) entra no hash agora — qualquer
+    # push de fix já invalida sozinho todo resultado cacheado de todos os
+    # deals, forçando reprocessamento de verdade na próxima vez que
+    # alguém clicar "Reprocessar", sem precisar reenviar arquivo nem
+    # mexer em prompt.
+    raw = f"{deal_id}:{agent_version_id}:{checksum}:{codigo_versao}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -1217,14 +1231,20 @@ def main():
     deal_data = get_deal_data(args.deal_id)
     agent_version = get_active_agent_version(args.agent)
 
-    input_hash = compute_input_hash(args.deal_id, agent_version["id"], deal_data["checksum"])
+    codigo_versao = os.environ.get("GITHUB_SHA", "dev-local")
+    input_hash = compute_input_hash(args.deal_id, agent_version["id"], deal_data["checksum"], codigo_versao)
 
-    # Idempotência: se já existe um run com esse hash exato, não reprocessa.
+    # Idempotência: se já existe um run com esse hash exato (mesmo
+    # arquivo, mesma versão do prompt, E MESMO COMMIT DO CÓDIGO), não
+    # reprocessa. Achado real em 28/08: antes, `synthesis_runs` não
+    # gravava nem checava `input_hash` — "já rodei cfo_synthesis pra esse
+    # deal alguma vez?" bastava pra pular pra sempre, sem olhar pra nada
+    # que mudou (nem arquivo, nem prompt, nem código). Agora as duas
+    # tabelas usam a mesma checagem, consistente.
     table = "synthesis_runs" if args.agent == "cfo_synthesis" else "agent_runs"
     existing = supabase_request(
         "GET",
-        f"{table}?deal_id=eq.{args.deal_id}&agent_version_id=eq.{agent_version['id']}"
-        + ("" if table == "synthesis_runs" else f"&input_hash=eq.{input_hash}"),
+        f"{table}?deal_id=eq.{args.deal_id}&agent_version_id=eq.{agent_version['id']}&input_hash=eq.{input_hash}",
     )
     if existing:
         print(f"[{args.agent}] já existe um run para este input — pulando (idempotência).")
@@ -1426,10 +1446,10 @@ def main():
         "output": output,
         "confidence": output.get("confidence"),
         "started_at": inicio.isoformat(),
+        "input_hash": input_hash,
     }
     if table == "agent_runs":
         row["deal_data_id"] = deal_data["id"]
-        row["input_hash"] = input_hash
     else:
         row["recommendation"] = output.get("recommendation")
 
