@@ -253,11 +253,23 @@ def build_excel(bundle: dict, path: str):
             ws.cell(row=row, column=i, value=h)
         style_header_row(ws, row, len(headers))
         row += 1
+        # Achado real em 28/08 (deal Fragatas/Tarchiani — Thiago desconfiando
+        # com razão de Folha de Pagamento/Margem Bruta, que dependem de
+        # separar despesas em categorias específicas, mais frágil que
+        # achar uma única linha de receita/resultado): marca com "*"
+        # quando o valor veio da aproximação linha-a-linha (ver
+        # `folha_pagamento_confianca` em dre_balancete_parser.py), pra
+        # quem lê saber que esse número específico tem confiança menor
+        # que os demais — sem esconder o dado, sem fingir certeza igual.
+        tem_folha_aproximada = any(l.get("folha_pagamento_confianca") == "aproximada_linha_a_linha" for l in linhas_v)
         campos_v = [
             ("Receita Bruta", "receita_bruta", False), ("Impostos", "impostos", False),
-            ("Receita Líquida", "receita_liquida", True), ("Folha de Pagamento", "folha_pagamento", False),
-            ("Custo de Sistemas", "custo_sistemas", False), ("Margem Bruta (R$)", "margem_bruta_rs", True),
-            ("Margem Bruta (%)", "margem_bruta_pct", True), ("Despesas Gerais", "despesas_gerais", False),
+            ("Receita Líquida", "receita_liquida", True),
+            ("Folha de Pagamento" + ("*" if tem_folha_aproximada else ""), "folha_pagamento", False),
+            ("Custo de Sistemas", "custo_sistemas", False),
+            ("Margem Bruta (R$)" + ("*" if tem_folha_aproximada else ""), "margem_bruta_rs", True),
+            ("Margem Bruta (%)" + ("*" if tem_folha_aproximada else ""), "margem_bruta_pct", True),
+            ("Despesas Gerais", "despesas_gerais", False),
             (rotulo_lucro, "lucro_operacional", True), ("(+) D&A", "d_a", False),
             (rotulo_margem_rs, "margem_ebitda_rs", True), (rotulo_margem_pct, "margem_ebitda_pct", True),
         ]
@@ -266,6 +278,17 @@ def build_excel(bundle: dict, path: str):
             for i, l in enumerate(linhas_v, start=2):
                 v = l.get(campo)
                 ws.cell(row=row, column=i, value=f"{v}%" if campo.endswith("_pct") and v is not None else v)
+            row += 1
+        if tem_folha_aproximada:
+            nota_folha = (
+                "* Folha de Pagamento não tem categoria própria nesta DRE (está "
+                "misturada dentro de uma categoria mais ampla, junto com outras "
+                "despesas) — valor estimado somando só as linhas claramente "
+                "identificáveis como pessoal (salário, FGTS, férias, INSS, hora "
+                "extra, vale-transporte, rescisão). Tende a SUBESTIMAR o valor "
+                "real, nunca superestimar. Margem Bruta herda a mesma ressalva."
+            )
+            ws.cell(row=row, column=1, value=nota_folha).font = Font(italic=True, size=9, color=TEXT_MUTED)
             row += 1
         if not tabela_viab.get("d_a_reconhecido"):
             nota_da = (

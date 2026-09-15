@@ -2036,11 +2036,22 @@ def montar_tabela_viabilidade_financeira(dre_estruturada: dict | None, hierarqui
             continue
         deducao = _achar_linha_por_padrao(fonte, _RE_MB_DEDUCAO_RECEITA, formato)
         despesa_pessoal = _achar_linha_por_padrao(fonte, _RE_MB_DESPESA_PESSOAL, formato)
+        folha_via_fallback = False
         if despesa_pessoal is None and formato == "hierarquia" and hierarquia:
             # Mesmo achado de `extrair_margem_bruta_de_dre` (28/08, deal
             # Fragatas/Tarchiani) — ver docstring de
             # `_estimar_folha_pagamento_por_linha`.
             despesa_pessoal = hierarquia.get("folha_pagamento_por_linha")
+            folha_via_fallback = despesa_pessoal is not None
+            # Achado real em 28/08 (Thiago, com razão, desconfiando mais
+            # de Folha/Custo de Sistemas do que do resto): esse fallback
+            # é uma APROXIMAÇÃO — acha as linhas de folha óbvias (salário,
+            # FGTS, férias...), mas pode não pegar 100% (subestima, nunca
+            # inventa pra mais). Em vez de fingir a mesma confiança de uma
+            # categoria própria já encontrada na fonte, marca de onde
+            # veio — pra quem lê saber o quanto confiar neste número
+            # específico, sem esconder o dado nem fingir certeza que não
+            # existe.
         custo_sistemas = _achar_linha_por_padrao(fonte, _RE_MB_CUSTO_SISTEMAS, formato)
         d_a = _achar_linha_por_padrao(fonte, _RE_MB_DA, formato)
 
@@ -2117,9 +2128,14 @@ def montar_tabela_viabilidade_financeira(dre_estruturada: dict | None, hierarqui
                 "impostos": -round(v_deducao, 2),
                 "receita_liquida": round(receita_liquida, 2),
                 "folha_pagamento": -round(v_pessoal, 2) if despesa_pessoal else None,
+                "folha_pagamento_confianca": (
+                    None if not despesa_pessoal else
+                    "aproximada_linha_a_linha" if folha_via_fallback else "categoria_propria_da_fonte"
+                ),
                 "custo_sistemas": -round(v_sistemas, 2) if custo_sistemas else None,
                 "margem_bruta_rs": round(margem_bruta_rs, 2),
                 "margem_bruta_pct": round(100 * margem_bruta_rs / v_receita, 2) if v_receita else None,
+                "margem_bruta_confianca": "aproximada_linha_a_linha" if folha_via_fallback else "categoria_propria_da_fonte",
                 "despesas_gerais": -round(despesas_gerais, 2),
                 "lucro_operacional": round(v_lucro_operacional, 2),
                 "d_a": round(v_da, 2) if d_a else None,
