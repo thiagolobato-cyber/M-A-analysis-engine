@@ -1582,7 +1582,15 @@ def calcular_resultado_de_hierarquia(hierarquia: dict) -> dict:
     }
 
 
-_RE_MB_RECEITA_BRUTA = re.compile(r"(?i)^[\d\s.\-()=+/]*(receitas?|faturamento)[\d\s.\-()=+/]*$|receita(?!.*l[íi]quida).*(bruta|serv|venda|faturamento)")
+_RE_MB_RECEITA_BRUTA = re.compile(r"(?i)^[\d\s.\-()=+/]*(receitas?|faturamento|recebimentos?)[\d\s.\-()=+/]*$|receita(?!.*l[íi]quida).*(bruta|serv|venda|faturamento)")
+# "recebimentos" adicionado (achado real em 28/08, deal Fragatas/
+# Tarchiani): "(+) RECEBIMENTOS" é a linha de receita da fonte (DRE
+# consolidada real do deal), mas não contém "receita" nem "faturamento"
+# — "recebimentos" é outro sinônimo comum, principalmente em DRE de
+# regime de caixa. Sem isso, receita voltava None, e SÓ POR ISSO
+# `montar_tabela_viabilidade_financeira` desistia e retornava None por
+# inteiro — mesmo com o resultado certo já disponível em
+# `linhas_resultado_da_fonte`, sentado do lado, correto, sem ser usado.
 # "faturamento" adicionado ao match exato (achado real em 28/08, deal
 # Mapah): "(+) FATURAMENTO" é a linha de receita da fonte, mas não
 # contém a palavra "receita" — "faturamento" é sinônimo comum de receita
