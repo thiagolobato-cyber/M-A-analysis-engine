@@ -728,6 +728,8 @@ def _escalar_hierarquia(resultado: dict, fator: float) -> dict:
         {**item, "valores": _aplicar_fator_escala(item["valores"], fator)}
         for item in resultado.get("raizes_ambiguas", [])
     ]
+    if resultado.get("folha_pagamento_por_linha"):
+        resultado["folha_pagamento_por_linha"] = _aplicar_fator_escala(resultado["folha_pagamento_por_linha"], fator)
     return resultado
 
 
@@ -1185,6 +1187,50 @@ def _rotulos_legiveis_periodo(meses_col: dict) -> list[str]:
     return rotulos
 
 
+_RE_LINHA_FOLHA_PAGAMENTO = re.compile(
+    r"(?i)\bsal[áa]rios?\b|13[º°o]\.?\s*sal[áa]rio|\bf[ée]rias\b|\bfgts\b|\binss\b|"
+    r"vale[\s_-]?transporte|pr[óo][\s_-]?labore|hora[s]?[\s_-]?extras?|resc[ií]s[ãa]o|"
+    r"encargos?\s*social|encargos?\s*trabalhista"
+)
+
+
+def _estimar_folha_pagamento_por_linha(ws, header_row: int, meses_col: dict, col_rotulo: int, max_data_rows: int = 300) -> dict | None:
+    """Achado real em 28/08 (deal Fragatas/Tarchiani, revisão pedida pelo
+    Thiago pra ir além do óbvio): quando a folha de pagamento não tem
+    categoria própria — está misturada dentro de uma categoria genérica
+    tipo "(-) OPERACIONAL" junto com depreciação, manutenção, materiais
+    de escritório etc., e a categoria-mãe não diz "pessoal"/"folha" em
+    lugar nenhum, só as LINHAS-FILHA dizem (Salários, 13º Salário,
+    FGTS, Férias...) — a busca por CATEGORIA nunca vai achar isso, não
+    importa quantos sinônimos eu adicione. Varre linha a linha (não por
+    categoria) e soma só as linhas cujo PRÓPRIO rótulo bate um termo de
+    folha inequívoco, não ambíguo com nada mais (salário, 13º salário,
+    férias, FGTS, INSS, vale-transporte, pró-labore, hora extra,
+    rescisão, encargos sociais/trabalhistas) — independente de qual
+    categoria-mãe elas estão. Aproximação por BAIXO de propósito: só
+    soma o que reconhece com confiança (a lista acima é dos termos
+    universais de folha no Brasil, sem risco real de falso positivo);
+    itens de benefício mais específicos (alimentação, plano de saúde,
+    seguro de vida, uniforme) ficam de fora — SUBESTIMA a folha real,
+    nunca superestima, e nunca finge ter achado 100% dela."""
+    soma: dict[str, float] = {}
+    tem_alguma = False
+    for row in ws.iter_rows(min_row=header_row + 1, max_row=header_row + max_data_rows, values_only=True):
+        if col_rotulo >= len(row):
+            continue
+        rotulo = row[col_rotulo]
+        if not rotulo or not _RE_LINHA_FOLHA_PAGAMENTO.search(str(rotulo)):
+            continue
+        tem_alguma = True
+        for mes_idx, (_, col_idx) in enumerate(meses_col.items(), start=1):
+            if col_idx < len(row):
+                num = _para_numero(row[col_idx])
+                if num is not None:
+                    chave = f"mes_{mes_idx:02d}"
+                    soma[chave] = soma.get(chave, 0) + num
+    return soma if tem_alguma else None
+
+
 def extrair_hierarquia_dre(wb, deteccao: dict, max_data_rows: int = 300) -> dict:
     """Reconstrói a hierarquia da DRE SEM nenhuma suposição de
     nomenclatura, em QUALQUER um dos dois formatos observados na prática
@@ -1236,7 +1282,15 @@ def extrair_hierarquia_dre(wb, deteccao: dict, max_data_rows: int = 300) -> dict
     resultado_indentacao["modo"] = "indentacao"
     resultado_indentacao["periodos_rotulos"] = _rotulos_legiveis_periodo(meses_col)
 
+    # Pré-calcula uma vez só, reaproveitado nos dois modos possíveis
+    # (indentação/colunas) — ver docstring de `_estimar_folha_pagamento_
+    # por_linha` pro motivo de existir: acha folha de pagamento mesmo
+    # quando ela está misturada dentro de uma categoria genérica sem
+    # nenhuma palavra de pessoal no nome da categoria-mãe.
+    folha_por_linha = _estimar_folha_pagamento_por_linha(ws, header_row, meses_col, col_rotulo, max_data_rows)
+
     if len(colunas_hier) <= 1:
+        resultado_indentacao["folha_pagamento_por_linha"] = folha_por_linha
         return _escalar_hierarquia(resultado_indentacao, deteccao.get("fator_escala", 1.0))
 
     # IMPORTANTE (bug real corrigido em 25/08): tentar achar um limiar
@@ -1261,6 +1315,7 @@ def extrair_hierarquia_dre(wb, deteccao: dict, max_data_rows: int = 300) -> dict
 
     vencedor = max(resultado_indentacao, resultado_colunas, key=_qualidade)
     vencedor["periodos_rotulos"] = _rotulos_legiveis_periodo(meses_col)
+    vencedor["folha_pagamento_por_linha"] = folha_por_linha
     return _escalar_hierarquia(vencedor, deteccao.get("fator_escala", 1.0))
 
 
@@ -1611,8 +1666,17 @@ _RE_MB_DESPESA_PESSOAL = re.compile(r"(?i)despesa.*pessoal|folha[\s_]*de[\s_]*pa
 # "(-) PESSOAL" sozinho, sem "despesa"/"folha" na frente; a regex antiga
 # exigia um desses prefixos e voltava `folha_pagamento: null` mesmo com
 # o dado presente e correto na fonte).
-_RE_MB_CUSTO_SISTEMAS = re.compile(r"(?i)custo.*sistemas?(?!.*financeiro)|servi[çc]os?[\s_]*de[\s_]*sistema|\bsistemas?\b(?!.*financeiro)")
-_RE_MB_DEDUCAO_RECEITA = re.compile(r"(?i)dedu[çc][ãa]?[oõ]e?s?.*receita|impostos?[\s_]*(s[/.]?[\s_]*|sobre[\s_]+(?:os?|as?)?[\s_]*)(venda|servi[çc]o|faturamento|receita)|pis.*cofins|^[\d\s.\-()=+/]*(dedu[çc][õo]es?|impostos?)[\d\s.\-()=+/]*$")
+_RE_MB_CUSTO_SISTEMAS = re.compile(r"(?i)custo.*sistemas?(?!.*financeiro)|servi[çc]os?[\s_]*de[\s_]*sistema|\bsistemas?\b(?!.*financeiro)|\bsoftwares?\b")
+# "software" adicionado (achado real em 28/08, deal Fragatas/Tarchiani):
+# "(-) DESPESAS COM SOFTWARE" não contém "sistema" em lugar nenhum.
+_RE_MB_DEDUCAO_RECEITA = re.compile(r"(?i)dedu[çc][ãa]?[oõ]e?s?.*receita|impostos?[\s_]*(s[/.]?[\s_]*|sobre[\s_]+(?:os?|as?)?[\s_]*)(venda|servi[çc]o|faturamento|receita)|pis.*cofins|^[\d\s.\-()=+/]*(dedu[çc][õo]es?|impostos?|tributos?)[\d\s.\-()=+/]*$")
+# "tributos" adicionado só no match EXATO (achado real em 28/08, deal
+# Fragatas/Tarchiani): "(-) TRIBUTOS" bare é a categoria de impostos
+# real dessa DRE. Fiz uma primeira tentativa com "tributos" como
+# substring livre e percebi na hora que isso bateria também em
+# "Tributos sobre o Lucro" (imposto de renda, categoria diferente) —
+# corrigido antes de aplicar: só no match exato, que já cobre o caso
+# real sem esse risco.
 # Segunda rodada de achado no Grupo Roma (28/08): mesmo depois do fix
 # acima, "Impostos" ainda saía errado — porque o rótulo real do arquivo é
 # "02. Impostos" (prefixo numerado de categoria), e a âncora de match
@@ -1765,6 +1829,15 @@ def extrair_margem_bruta_de_dre(dre_estruturada: dict | None, hierarquia: dict |
         if receita is None:
             receita = _achar_linha_por_padrao(fonte, _RE_MB_RECEITA_LIQUIDA, formato)
         despesa_pessoal = _achar_linha_por_padrao(fonte, _RE_MB_DESPESA_PESSOAL, formato)
+        if despesa_pessoal is None and formato == "hierarquia" and hierarquia:
+            # Achado real em 28/08 (deal Fragatas/Tarchiani): quando a
+            # folha de pagamento está misturada dentro de uma categoria
+            # genérica (ex.: "(-) OPERACIONAL", sem nenhuma palavra de
+            # pessoal no nome), a busca por CATEGORIA nunca ia achar —
+            # não importa quantos sinônimos eu adicionasse. Ver
+            # `_estimar_folha_pagamento_por_linha` — acha linha a linha,
+            # independente da categoria-mãe.
+            despesa_pessoal = hierarquia.get("folha_pagamento_por_linha")
         custo_sistemas = _achar_linha_por_padrao(fonte, _RE_MB_CUSTO_SISTEMAS, formato)
         deducao = _achar_linha_por_padrao(fonte, _RE_MB_DEDUCAO_RECEITA, formato)
 
@@ -1846,6 +1919,11 @@ def montar_mini_dre(dre_estruturada: dict | None, hierarquia: dict | None, perio
             continue
         deducao = _achar_linha_por_padrao(fonte, _RE_MB_DEDUCAO_RECEITA, formato)
         despesa_pessoal = _achar_linha_por_padrao(fonte, _RE_MB_DESPESA_PESSOAL, formato)
+        if despesa_pessoal is None and formato == "hierarquia" and hierarquia:
+            # Mesmo achado de `extrair_margem_bruta_de_dre` (28/08, deal
+            # Fragatas/Tarchiani) — ver docstring de
+            # `_estimar_folha_pagamento_por_linha`.
+            despesa_pessoal = hierarquia.get("folha_pagamento_por_linha")
         custo_sistemas = _achar_linha_por_padrao(fonte, _RE_MB_CUSTO_SISTEMAS, formato)
 
         # Resultado final: prioriza a ÚLTIMA linha "(=)" da hierarquia
@@ -1958,6 +2036,11 @@ def montar_tabela_viabilidade_financeira(dre_estruturada: dict | None, hierarqui
             continue
         deducao = _achar_linha_por_padrao(fonte, _RE_MB_DEDUCAO_RECEITA, formato)
         despesa_pessoal = _achar_linha_por_padrao(fonte, _RE_MB_DESPESA_PESSOAL, formato)
+        if despesa_pessoal is None and formato == "hierarquia" and hierarquia:
+            # Mesmo achado de `extrair_margem_bruta_de_dre` (28/08, deal
+            # Fragatas/Tarchiani) — ver docstring de
+            # `_estimar_folha_pagamento_por_linha`.
+            despesa_pessoal = hierarquia.get("folha_pagamento_por_linha")
         custo_sistemas = _achar_linha_por_padrao(fonte, _RE_MB_CUSTO_SISTEMAS, formato)
         d_a = _achar_linha_por_padrao(fonte, _RE_MB_DA, formato)
 
