@@ -777,9 +777,27 @@ def run_extraction(deal_id: str):
     full_dump = "\n\n".join(combined_text)
     checksum = hashlib.sha256(raw_bytes_for_checksum).hexdigest()
 
-    existing = supabase_request("GET", f"deal_data?deal_id=eq.{deal_id}&checksum=eq.{checksum}")
+    # Achado real em 28/08 (deal Fragatas/Tarchiani — Thiago mostrou um
+    # EBITDA errado numa rodada GENUINAMENTE NOVA, depois do fix de
+    # idempotência dos AGENTES já estar no ar; investigando, o run do
+    # agente realmente foi novo, mas ele leu um `deal_data.raw_extracted`
+    # de HORAS ANTES, porque a EXTRAÇÃO tem a própria trava de cache,
+    # separada da dos agentes, e essa só olhava deal+checksum do
+    # arquivo — nunca a versão do código. Quase todo o trabalho de hoje
+    # (dupla contagem, forward-fill, "faturamento", R$ mil, período
+    # único, tudo) mora exatamente dentro desta função — sem esse
+    # segundo fix, nada disso chegava a rodar de novo num deal já
+    # processado antes, mesmo com o fix de idempotência dos agentes já
+    # certo. `extraction_key` é uma chave PRÓPRIA pra essa checagem
+    # (deal+checksum+código) — `checksum` continua guardando só o hash
+    # do arquivo, sem misturar os dois conceitos, porque outras partes
+    # do código dependem do `checksum` significar só "o arquivo".
+    codigo_versao = os.environ.get("GITHUB_SHA", "dev-local")
+    extraction_key = hashlib.sha256(f"{checksum}:{codigo_versao}".encode()).hexdigest()
+
+    existing = supabase_request("GET", f"deal_data?deal_id=eq.{deal_id}&extraction_key=eq.{extraction_key}")
     if existing:
-        print("[extraction] mesmo conjunto de arquivos já extraído antes — pulando (idempotência).")
+        print("[extraction] mesmo conjunto de arquivos JÁ EXTRAÍDO com esta MESMA versão do código — pulando (idempotência).")
         return
 
     output = call_claude(
@@ -1010,6 +1028,7 @@ def run_extraction(deal_id: str):
         "structured": output.get("structured", {}),
         "raw_extracted": output.get("raw_extracted", {}),
         "checksum": checksum,
+        "extraction_key": extraction_key,
     })
     deal_data_id = deal_data_row[0]["id"] if isinstance(deal_data_row, list) else deal_data_row["id"]
 
