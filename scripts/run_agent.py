@@ -30,6 +30,7 @@ import subprocess
 import sys
 import urllib.request
 import urllib.error
+from datetime import datetime, timezone
 
 from openpyxl import load_workbook
 
@@ -210,8 +211,7 @@ Classifique CADA rótulo em exatamente uma destas categorias:
   pró-labore de sócio quando ligado à operação do dia a dia.
 - "custo_sistemas": qualquer sistema, software, licença, ERP, ferramenta
   de gestão, ponto eletrônico, aplicativo usado na operação — mesmo que
-  o nome da linha seja só o nome comercial do produto (ex.: "Digisac",
-  "Domínio Sistemas").
+  o nome da linha seja só o nome comercial do produto.
 - "outra_despesa": qualquer despesa que não se encaixa claramente nas
   duas categorias acima (aluguel, energia, telefone, impostos,
   despesas financeiras, marketing, etc.) — é o padrão pra tudo que não é
@@ -231,25 +231,22 @@ maiúsculas/minúsculas, acentos)."""
 
 def classificar_categoria_financeira_via_ia(rotulos: list[str], model: str | None = None) -> dict[str, str]:
     """Fallback pra quando `_RE_MB_DESPESA_PESSOAL`/`_RE_MB_CUSTO_SISTEMAS`/
-    `_RE_MB_RECEITA_BRUTA` (regex, `dre_balancete_parser.py`) não
-    encontram nada — achado real em 26/08, testando contra ~30 DREs
-    reais: regex acerta a maioria dos casos óbvios, mas cada arquivo
-    novo tem chance real de trazer um sinônimo não previsto ("PESSOAL"
-    sozinho, sem "Despesa com"; "Despesas com Pessoas", não "Pessoal";
-    "Digisac"/"Domínio Sistemas" sem a palavra "sistema" central o
-    bastante pro regex genérico bater; receita detalhada por CLIENTE
-    individual, sem nenhuma linha agregada "Receita Bruta") — isso é
-    reconhecimento de SIGNIFICADO, não de sintaxe, e regex estruturalmente
-    não converge pra esse tipo de problema (vocabulário contábil é
-    efetivamente ilimitado entre escritórios diferentes).
+    `_RE_MB_RECEITA_BRUTA` (regex, `dre_balancete_parser.py`) e o fallback
+    determinístico `_estimar_folha_pagamento_por_linha` não encontram
+    nada — testando contra ~30 DREs reais: mesmo com todo o regex e
+    fallback determinístico já existentes, cada arquivo novo ainda tem
+    chance de trazer algo genuinamente fora do previsto (ex.: receita
+    detalhada por CLIENTE individual, sem nenhuma linha agregada
+    "Receita Bruta" — achado real no SKZ Oberle, onde nem
+    `_estimar_folha_pagamento_por_linha` ajuda, porque o problema não é
+    a folha, é a receita).
 
-    Só roda sobre as RAÍZES já isoladas pela extração de estrutura (tipicamente
-    5-25 rótulos, não a planilha inteira) — código continua fazendo toda a
-    detecção de estrutura/hierarquia/matemática, IA só resolve a categoria
-    quando o regex genuinamente não sabe. Retorna {} se a chamada falhar
-    (rede, JSON malformado) — nunca bloqueia a extração, quem chama decide
-    o que fazer com a ausência (cair pro formulário, ou reportar como não
-    disponível)."""
+    Só roda sobre as RAÍZES já isoladas pela extração de estrutura
+    (tipicamente dezenas, não a planilha inteira) — código continua
+    fazendo toda a detecção de estrutura/hierarquia/matemática, IA só
+    resolve a categoria quando regex E fallback determinístico já
+    falharam. Retorna {} se a chamada falhar (rede, JSON malformado) —
+    nunca bloqueia a extração."""
     if not rotulos:
         return {}
     try:
@@ -441,6 +438,33 @@ def excel_to_text(file_bytes: bytes, filename: str) -> tuple[str, list, dict, di
     dre_linhas: dict = {}
     dre_hierarquia_info: dict | None = None
     dre_deteccao = detect_dre_sheet(wb)
+    multi_entidade_ambigua_nota = None
+    if dre_deteccao and dre_deteccao.get("multi_entidade_ambigua"):
+        # Achado real em 27/08 (deal Irko): a aba tem 2+ blocos de
+        # empresa empilhados (holding), mas nenhum bloco "combinado"/
+        # "consolidado" claro pra escolher sozinho. Adivinhar aqui é
+        # exatamente o bug que gerou o resultado errado do Irko (pegar
+        # uma subsidiária como se fosse o grupo todo) — então NÃO
+        # tenta extração fina nem hierarquia neste arquivo. Trata como
+        # "sem DRE reconhecível" (dre_deteccao vira None daqui pra
+        # frente) e deixa uma nota explícita, que vira red flag visível
+        # pro Thiago/parceiro resolver manualmente, em vez de um número
+        # errado sem aviso nenhum.
+        multi_entidade_ambigua_nota = (
+            f"Aba '{dre_deteccao['aba']}' tem {len(dre_deteccao['blocos_detectados'])} blocos de "
+            f"empresa/entidade ({', '.join(dre_deteccao['blocos_detectados'])}), mas nenhum bloco "
+            "claramente 'combinado'/'consolidado' foi identificado — extração financeira NÃO "
+            "prosseguiu neste arquivo pra evitar pegar uma subsidiária isolada como se fosse o "
+            "total. Confirmar com o parceiro qual bloco (ou soma) representa o deal, ou renomear "
+            "o bloco correto pra incluir 'combinado'/'consolidado'/'total grupo' no rótulo."
+        )
+        parts.append(
+            f"===== AVISO: MÚLTIPLAS EMPRESAS DETECTADAS NA ABA '{dre_deteccao['aba']}' =====\n"
+            + multi_entidade_ambigua_nota
+        )
+        dre_hierarquia_info = {"multi_entidade_ambigua": True, "nota": multi_entidade_ambigua_nota,
+                                "blocos_detectados": dre_deteccao["blocos_detectados"]}
+        dre_deteccao = None
     if dre_deteccao:
         dre_linhas = parse_dre_sheet(wb, dre_deteccao)
         skip_sheets.add(dre_deteccao["aba"])
@@ -528,7 +552,75 @@ def excel_to_text(file_bytes: bytes, filename: str) -> tuple[str, list, dict, di
                         ainda_ambiguas.append(r)
                 hierarquia["raizes_ambiguas"] = ainda_ambiguas
 
+                # Achado real em 28/08 (deal Fragatas/Tarchiani — Thiago
+                # reportou dois números de EBITDA diferentes no mesmo
+                # Excel: "Lucro Líquido" R$247.309,57 correto, "EBITDA
+                # Reportado" R$1.129.793,63 errado, no MESMO arquivo).
+                # Causa: dois cálculos INDEPENDENTES sobre a mesma
+                # hierarquia — `calcular_resultado_de_hierarquia` (bottom-
+                # up: soma tudo que é "receita" menos tudo que é
+                # "despesa") e `montar_tabela_viabilidade_financeira`
+                # (busca a linha de resultado específica da fonte — a
+                # mesma lógica testada e comprovada hoje em 8 deals
+                # reais). Podiam concordar (Grupo Roma) ou divergir
+                # (Fragatas/Tarchiani, quando categorização fica
+                # incompleta) sem nenhum aviso — o agente via os dois
+                # números e não tinha como saber qual confiar. Elimina a
+                # duplicidade na raiz: usa o resultado de
+                # `tabela_viabilidade_financeira` como valor autoritativo
+                # sempre que disponível — as duas células do Excel nunca
+                # mais podem discordar, porque passam a vir da mesma
+                # conta.
                 resultado_calc = calcular_resultado_de_hierarquia(hierarquia)
+                periodos_rotulos_reconciliacao = _rotulos_legiveis_periodo(dre_deteccao["meses_para_coluna"])
+                tabela_viab_reconciliacao = montar_tabela_viabilidade_financeira(None, hierarquia, periodos_rotulos_reconciliacao)
+                if tabela_viab_reconciliacao and tabela_viab_reconciliacao.get("linhas"):
+                    if dre_deteccao.get("granularidade") == "mensal":
+                        # Meses sequenciais do MESMO ano — somar os 12
+                        # períodos dá o total anual, que é exatamente o
+                        # número que faz sentido reportar (validado hoje
+                        # em Grupo Roma e Fragatas/Tarchiani).
+                        soma_resultado_reconciliado = sum(
+                            l.get("lucro_operacional") or 0 for l in tabela_viab_reconciliacao["linhas"]
+                        )
+                        resultado_calc["ebitda_aproximado"] = round(soma_resultado_reconciliado, 2)
+                        resultado_calc["resultado_operacional_total"] = round(soma_resultado_reconciliado, 2)
+                        resultado_calc["fonte"] = "tabela_viabilidade_financeira_v2"
+                        resultado_calc["nota_reconciliacao"] = (
+                            "Valor reconciliado com tabela_viabilidade_financeira em 28/08 "
+                            "— substitui o cálculo bottom-up antigo (campo mantido só por "
+                            "compatibilidade retroativa), que podia divergir silenciosamente "
+                            "deste mesmo número em outra célula do Excel/PPT."
+                        )
+                    else:
+                        # Achado real em 28/08 (deal SKZ Oberle — o fix
+                        # acima, testado só com meses sequenciais de UM
+                        # ano, quebrou aqui: colunas são ANOS/CENÁRIOS
+                        # COMPARATIVOS diferentes (2023, 2024, "2025 YTD
+                        # Out", "Est. 2025", "Proj. 2026") — somar os 5
+                        # "períodos" juntos não representa nada real
+                        # (mistura ano fechado + ano em andamento +
+                        # estimativa + projeção futura), e foi exatamente
+                        # isso que produziu o R$23.602.266,25 sem sentido
+                        # que apareceu como red flag no relatório do
+                        # Thiago. Pra granularidade "anual" (colunas
+                        # comparativas, não meses de um único ano), NÃO
+                        # inventa um agregado — deixa `ebitda_aproximado`
+                        # ausente e aponta pra `linhas_resultado_da_fonte`
+                        # (já existe abaixo), que tem cada período
+                        # rotulado corretamente pro agente escolher o
+                        # certo, em vez de confiar numa soma sem
+                        # significado.
+                        resultado_calc["ebitda_aproximado"] = None
+                        resultado_calc["resultado_operacional_total"] = None
+                        resultado_calc["fonte"] = "periodos_comparativos_ver_linhas_da_fonte"
+                        resultado_calc["nota_reconciliacao"] = (
+                            "Granularidade 'anual' com múltiplas colunas comparativas "
+                            "(anos/cenários diferentes, não meses do mesmo ano) — nenhum "
+                            "agregado único faz sentido aqui. Use os valores por período em "
+                            "`linhas_resultado_da_fonte` (cada um rotulado com o período "
+                            "correto), não uma soma entre eles."
+                        )
                 dre_hierarquia_info = {"hierarquia": hierarquia, "resultado": resultado_calc}
                 parts.append(format_hierarquia_dre(hierarquia, resultado_calc))
 
@@ -697,6 +789,11 @@ def run_extraction(deal_id: str):
     injetada direto no resultado — não pedimos pro Claude copiar de volta
     uma tabela de centenas de contas x 12 meses que o código já tem. Isso
     era o que estava estourando o timeout de 10 minutos (visto em 19/08)."""
+    inicio = datetime.now(timezone.utc)  # achado real em 28/08 (item 2 da lista
+    # de melhorias): sem isso, o site não tinha como saber quanto tempo CADA
+    # agente levou de verdade — só "há quanto tempo terminou". Grava junto
+    # com o resultado (`started_at`), pro front calcular a duração real de
+    # cada estágio sem precisar aproximar assumindo que todos começam juntos.
     files = supabase_request("GET", f"files?deal_id=eq.{deal_id}")
     if not files:
         raise SystemExit(f"Nenhum arquivo encontrado para o deal {deal_id} — nada para extrair.")
@@ -757,9 +854,27 @@ def run_extraction(deal_id: str):
     full_dump = "\n\n".join(combined_text)
     checksum = hashlib.sha256(raw_bytes_for_checksum).hexdigest()
 
-    existing = supabase_request("GET", f"deal_data?deal_id=eq.{deal_id}&checksum=eq.{checksum}")
+    # Achado real em 28/08 (deal Fragatas/Tarchiani — Thiago mostrou um
+    # EBITDA errado numa rodada GENUINAMENTE NOVA, depois do fix de
+    # idempotência dos AGENTES já estar no ar; investigando, o run do
+    # agente realmente foi novo, mas ele leu um `deal_data.raw_extracted`
+    # de HORAS ANTES, porque a EXTRAÇÃO tem a própria trava de cache,
+    # separada da dos agentes, e essa só olhava deal+checksum do
+    # arquivo — nunca a versão do código. Quase todo o trabalho de hoje
+    # (dupla contagem, forward-fill, "faturamento", R$ mil, período
+    # único, tudo) mora exatamente dentro desta função — sem esse
+    # segundo fix, nada disso chegava a rodar de novo num deal já
+    # processado antes, mesmo com o fix de idempotência dos agentes já
+    # certo. `extraction_key` é uma chave PRÓPRIA pra essa checagem
+    # (deal+checksum+código) — `checksum` continua guardando só o hash
+    # do arquivo, sem misturar os dois conceitos, porque outras partes
+    # do código dependem do `checksum` significar só "o arquivo".
+    codigo_versao = os.environ.get("GITHUB_SHA", "dev-local")
+    extraction_key = hashlib.sha256(f"{checksum}:{codigo_versao}".encode()).hexdigest()
+
+    existing = supabase_request("GET", f"deal_data?deal_id=eq.{deal_id}&extraction_key=eq.{extraction_key}")
     if existing:
-        print("[extraction] mesmo conjunto de arquivos já extraído antes — pulando (idempotência).")
+        print("[extraction] mesmo conjunto de arquivos JÁ EXTRAÍDO com esta MESMA versão do código — pulando (idempotência).")
         return
 
     output = call_claude(
@@ -855,27 +970,18 @@ def run_extraction(deal_id: str):
         primeira_hierarquia = next(iter(code_computed_dre_hierarquia.values()), {}).get("hierarquia") if code_computed_dre_hierarquia else None
         margem_de_dre = extrair_margem_bruta_de_dre(primeira_dre_fina, primeira_hierarquia, mapeado["regime_tributario"])
 
-        # Fallback por IA (achado real em 26/08, testando ~15 DREs reais
-        # de ponta a ponta): regex sozinho acerta a maioria, mas cada
-        # arquivo novo tem chance real de trazer um sinônimo não
-        # previsto, ou uma categoria diluída em várias linhas sem
-        # subtotal próprio — isso é reconhecimento de significado, não
-        # de sintaxe, regex estruturalmente não converge sozinho. Só
-        # chama IA quando o regex genuinamente não achou nada (nunca
-        # substitui um resultado que já funcionou) — e só manda os
-        # rótulos-raiz já isolados pela extração de estrutura (tipicamente
-        # dezenas, não a planilha inteira).
+        # Fallback por IA — última tentativa ANTES do bloqueio (nunca
+        # substitui a regra "nunca formulário" de 28/08 logo abaixo, só
+        # evita bloquear desnecessariamente quando o regex e o fallback
+        # determinístico de folha já esgotaram e a IA ainda consegue
+        # resolver o que sobrou — ex.: receita detalhada por cliente
+        # individual, sem linha agregada, achado real no SKZ Oberle).
+        # Só manda os rótulos-raiz já isolados pela extração de
+        # estrutura (tipicamente dezenas, não a planilha inteira).
         if not margem_de_dre and (primeira_dre_fina or primeira_hierarquia):
             hierarquia_dict = {"raizes_classificadas": primeira_hierarquia} if primeira_hierarquia else None
-            candidatos_ia = rotulos_sem_categoria_financeira(primeira_dre_fina, hierarquia_dict)
-            # Também inclui candidatos de RECEITA — achado real no SKZ
-            # Oberle: quando a receita vem detalhada por cliente
-            # individual, sem linha agregada, o regex nunca acha nada e
-            # a extração inteira desiste (mesmo já tendo despesa
-            # reconhecida). Uma única chamada de IA classifica os dois
-            # lados juntos (mais barato que 2 chamadas separadas).
-            candidatos_receita = rotulos_candidatos_receita(primeira_dre_fina, hierarquia_dict)
-            candidatos_ia = sorted(set(candidatos_ia) | set(candidatos_receita))
+            candidatos_ia = sorted(set(rotulos_sem_categoria_financeira(primeira_dre_fina, hierarquia_dict))
+                                    | set(rotulos_candidatos_receita(primeira_dre_fina, hierarquia_dict)))
             if candidatos_ia:
                 mapa_ia = classificar_categoria_financeira_via_ia(candidatos_ia)
                 if mapa_ia:
@@ -884,34 +990,24 @@ def run_extraction(deal_id: str):
                     )
 
         if margem_de_dre and margem_de_dre.get("confianca") == "baixa":
-            # Achado real em 26/08, pedido explícito do Thiago ("não
-            # volte com menos que 99%"): a resposta certa quando a DRE
-            # dá um resultado implausível não é fingir certeza nem
-            # trocar silenciosamente pro formulário (que também pode
-            # estar errado/desatualizado — é só um instantâneo preenchido
-            # à mão). É mostrar AS DUAS fontes lado a lado e marcar
-            # claramente que precisa de revisão manual — nunca reportar
-            # um número só, escondendo a incerteza real que existe aqui.
+            # A resposta certa quando a DRE dá um resultado implausível
+            # (mesmo depois de tentar a margem pronta da própria fonte)
+            # não é fingir certeza nem — por decisão do Thiago de 28/08 —
+            # cair pro formulário. É usar o valor mesmo assim, mas
+            # marcar claramente que precisa de revisão manual, com o
+            # motivo explícito de onde veio a incerteza.
             ultimo_periodo = list(margem_de_dre["margem_bruta_pct_por_periodo"])[-1]
-            margem_dre_valor = margem_de_dre["margem_bruta_pct_por_periodo"][ultimo_periodo]
-            margem_formulario = calcular_margem_bruta(
-                mapeado["faturamento_mensal"], mapeado["folha_informada"], mapeado["custo_sistemas"],
-                mapeado["regime_tributario"], mapeado["rbt12"],
-            )
-            margem_bruta_pct_final = margem_formulario["margem_bruta_pct"]
-            custo_folha_pct = (
-                100 * mapeado["folha_informada"] / mapeado["faturamento_mensal"]
-                if mapeado["faturamento_mensal"] else None
-            )
+            margem_bruta_pct_final = margem_de_dre["margem_bruta_pct_por_periodo"][ultimo_periodo]
+            custo_folha_pct = margem_de_dre["custo_folha_pct_por_periodo"].get(ultimo_periodo)
             margem_bruta_calculada = {
                 "margem_bruta_pct": margem_bruta_pct_final,
-                "fonte": "atencao_revisar_manualmente",
+                "fonte": "dre_confianca_baixa_revisar_manualmente",
                 "motivo": (
-                    f"A DRE deu um resultado fora da faixa plausível pro cálculo automático "
-                    f"({margem_dre_valor}% no último período) — provavelmente a extração não "
-                    f"achou todos os componentes de custo corretamente. Usando o formulário "
-                    f"({margem_bruta_pct_final}%) como valor provisório, mas NENHUM dos dois "
-                    f"deve ser aceito sem checagem manual contra a DRE original."
+                    f"DRE disponível, mas o cálculo automático deu um resultado que precisa "
+                    f"de confirmação manual ({margem_bruta_pct_final}% no período mais recente"
+                    + (f" — {margem_de_dre['motivo_baixa_confianca']}" if margem_de_dre.get("motivo_baixa_confianca") else "")
+                    + "). Não cai pro formulário (decisão do Thiago em 28/08) — revisar contra "
+                      "a DRE original antes de confiar neste número."
                 ),
                 "todos_periodos": margem_de_dre["margem_bruta_pct_por_periodo"],
             }
@@ -933,29 +1029,38 @@ def run_extraction(deal_id: str):
                 "todos_periodos": margem_de_dre["margem_bruta_pct_por_periodo"],
             }
         else:
-            # BUG REAL CORRIGIDO EM 26/08: esta variável só existia dentro
-            # deste branch, mas era referenciada mais abaixo (raw_extracted)
-            # de forma incondicional — quebrava com NameError toda vez que a
-            # DRE fosse a fonte usada (branch acima), que passou a ser o
-            # caminho mais comum depois da decisão "quem manda é a DRE".
-            margem_formulario = calcular_margem_bruta(
-                mapeado["faturamento_mensal"], mapeado["folha_informada"], mapeado["custo_sistemas"],
-                mapeado["regime_tributario"], mapeado["rbt12"],
-            )
-            margem_bruta_pct_final = margem_formulario["margem_bruta_pct"]
-            custo_folha_pct = (
-                100 * mapeado["folha_informada"] / mapeado["faturamento_mensal"]
-                if mapeado["faturamento_mensal"] else None
-            )
+            # Achado real em 28/08 (deal Fragatas/Tarchiani — o time subiu
+            # PDF, que o motor não sabe ler, e caiu pro formulário sem
+            # avisar suficientemente alto: EBITDA de R$1,13M baseado em
+            # formulário divergindo 11,2x do real da DRE). Decisão do
+            # Thiago no mesmo dia: "desconsiderar SEMPRE o formulário,
+            # SEMPRE usar DRE" pra esses números — substitui a decisão
+            # anterior (26/08, "DRE > formulário, cai pro formulário se
+            # a DRE não tiver os componentes"). Não cai mais pra
+            # formulário nunca — se a DRE não tem os componentes
+            # necessários, o dado fica None (explicitamente ausente,
+            # não estimado), e `avaliar_viabilidade_financeira` já sabe
+            # tratar None como "Dados insuficientes" em vez de travar ou
+            # inventar um número. Isso é bloqueio, não aproximação.
+            margem_bruta_pct_final = None
+            custo_folha_pct = None
             motivo_formulario = (
-                "Nenhuma DRE disponível nesse deal."
+                "Nenhuma DRE disponível nesse deal — e por decisão do Thiago em "
+                "28/08, formulário NUNCA é usado como fonte pra Margem Bruta/Custo "
+                "Folha/Custo Sistemas, nem como aproximação. Dado fica ausente até "
+                "uma DRE legível ser fornecida."
                 if not (code_computed_dre or code_computed_dre_hierarquia)
                 else "DRE disponível, mas sem os componentes necessários reconhecíveis "
-                     "(Receita/Despesa com Pessoal/Custo Sistemas) — caiu pro formulário."
+                     "(Receita/Despesa com Pessoal/Custo Sistemas) — E POR DECISÃO DO "
+                     "THIAGO EM 28/08, formulário não é mais usado como fallback pra "
+                     "esses números (mesmo que a DRE seja um PDF que o motor não saiba "
+                     "ler ainda). Isso é um BLOQUEIO: peça uma DRE em Excel legível, "
+                     "não confie no formulário pra margem/custo folha/custo sistemas "
+                     "deste deal."
             )
             margem_bruta_calculada = {
-                **margem_formulario,
-                "fonte": "formulario",
+                "margem_bruta_pct": None,
+                "fonte": "bloqueado_sem_dre_confiavel",
                 "motivo": motivo_formulario,
             }
 
@@ -1002,10 +1107,10 @@ def run_extraction(deal_id: str):
         if custo_sistemas_pct_dre is not None:
             custo_sistemas_pct = custo_sistemas_pct_dre
         else:
-            custo_sistemas_pct = (
-                100 * mapeado["custo_sistemas"] / mapeado["faturamento_mensal"]
-                if mapeado["faturamento_mensal"] else None
-            )
+            # Mesma decisão do Thiago em 28/08 aplicada aqui: sem DRE
+            # legível pro Custo de Sistemas, o dado fica None — não cai
+            # mais pro formulário como aproximação.
+            custo_sistemas_pct = None
         bloco_b = avaliar_complexidade_operacional(
             custo_sistemas_pct, mapeado["localizacao_fora_grande_sp"],
             mapeado["numero_clientes"], mapeado["numero_colaboradores"],
@@ -1041,6 +1146,7 @@ def run_extraction(deal_id: str):
         "structured": output.get("structured", {}),
         "raw_extracted": output.get("raw_extracted", {}),
         "checksum": checksum,
+        "extraction_key": extraction_key,
     })
     deal_data_id = deal_data_row[0]["id"] if isinstance(deal_data_row, list) else deal_data_row["id"]
 
@@ -1054,6 +1160,7 @@ def run_extraction(deal_id: str):
         "status": "completed",
         "output": output,
         "confidence": output.get("confidence"),
+        "started_at": inicio.isoformat(),
     })
     print(f"[extraction] deal_data criado ({deal_data_id}), confidence={output.get('confidence')}")
 
@@ -1228,8 +1335,22 @@ def _extract_json(text: str) -> dict | None:
     return None
 
 
-def compute_input_hash(deal_id: str, agent_version_id: str, checksum: str) -> str:
-    raw = f"{deal_id}:{agent_version_id}:{checksum}"
+def compute_input_hash(deal_id: str, agent_version_id: str, checksum: str, codigo_versao: str) -> str:
+    # Achado real em 28/08 — Thiago reportou deals JÁ CORRIGIDOS (Irko,
+    # Fragatas/Tarchiani, BWA 360) continuando com o bug antigo mesmo
+    # depois do código estar corrigido no GitHub. Causa raiz: o hash de
+    # idempotência só olhava deal+versão do PROMPT de IA+arquivo — nunca
+    # a versão do CÓDIGO Python. Corrigir um bug em `run_agent.py`/
+    # `dre_balancete_parser.py` não muda nem o prompt nem o arquivo, e
+    # "Reprocessar" no mesmo deal caía direto na idempotência: "já rodei
+    # isso antes" — sem nunca chegar a executar o código corrigido.
+    # `GITHUB_SHA` (o commit que está rodando, disponível automaticamente
+    # em todo workflow do GitHub Actions) entra no hash agora — qualquer
+    # push de fix já invalida sozinho todo resultado cacheado de todos os
+    # deals, forçando reprocessamento de verdade na próxima vez que
+    # alguém clicar "Reprocessar", sem precisar reenviar arquivo nem
+    # mexer em prompt.
+    raw = f"{deal_id}:{agent_version_id}:{checksum}:{codigo_versao}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -1238,6 +1359,7 @@ def main():
     parser.add_argument("--agent", required=True)
     parser.add_argument("--deal-id", required=True)
     args = parser.parse_args()
+    inicio = datetime.now(timezone.utc)  # ver comentário equivalente em run_extraction
 
     if args.agent == "extraction":
         run_extraction(args.deal_id)
@@ -1246,14 +1368,20 @@ def main():
     deal_data = get_deal_data(args.deal_id)
     agent_version = get_active_agent_version(args.agent)
 
-    input_hash = compute_input_hash(args.deal_id, agent_version["id"], deal_data["checksum"])
+    codigo_versao = os.environ.get("GITHUB_SHA", "dev-local")
+    input_hash = compute_input_hash(args.deal_id, agent_version["id"], deal_data["checksum"], codigo_versao)
 
-    # Idempotência: se já existe um run com esse hash exato, não reprocessa.
+    # Idempotência: se já existe um run com esse hash exato (mesmo
+    # arquivo, mesma versão do prompt, E MESMO COMMIT DO CÓDIGO), não
+    # reprocessa. Achado real em 28/08: antes, `synthesis_runs` não
+    # gravava nem checava `input_hash` — "já rodei cfo_synthesis pra esse
+    # deal alguma vez?" bastava pra pular pra sempre, sem olhar pra nada
+    # que mudou (nem arquivo, nem prompt, nem código). Agora as duas
+    # tabelas usam a mesma checagem, consistente.
     table = "synthesis_runs" if args.agent == "cfo_synthesis" else "agent_runs"
     existing = supabase_request(
         "GET",
-        f"{table}?deal_id=eq.{args.deal_id}&agent_version_id=eq.{agent_version['id']}"
-        + ("" if table == "synthesis_runs" else f"&input_hash=eq.{input_hash}"),
+        f"{table}?deal_id=eq.{args.deal_id}&agent_version_id=eq.{agent_version['id']}&input_hash=eq.{input_hash}",
     )
     if existing:
         print(f"[{args.agent}] já existe um run para este input — pulando (idempotência).")
@@ -1282,8 +1410,65 @@ def main():
             # 5 correções pra bater, a DRE bateu de primeira).
             primeira_dre = next(iter(dre_estruturada.values()))
             raw["ebitda_calculado"] = calcular_ebitda_de_dre(primeira_dre)
+            # Reconciliação com `tabela_viabilidade_financeira` — mesma
+            # técnica já usada acima pra `resultado_calc` (achado real,
+            # deal Fragatas/Tarchiani: dois números de EBITDA diferentes
+            # no mesmo Excel). Achado aqui, testando de ponta a ponta: a
+            # MESMA duplicidade existia num lugar que aquele fix não
+            # cobria — `calcular_ebitda_de_dre` (caminho fixo antigo,
+            # só bate `DRE_CATEGORIAS`) retornava tudo None em vários
+            # arquivos reais onde o Bloco A (via regex generalizado +
+            # hierarquia N-níveis + fallback de IA) já calculava a
+            # margem corretamente — `financial_analysis` ficava sem
+            # nenhum número, mesmo quando a recomendação final já tinha
+            # um bom. Usa `tabela_viabilidade_financeira` (já calculada
+            # acima, é a mesma fonte que o Bloco A usa) como reconciliação
+            # quando o caminho fixo falhar — nunca troca um resultado que
+            # já veio preenchido, só preenche o vazio.
+            if not raw["ebitda_calculado"] or raw["ebitda_calculado"].get("margem_ebitda_pct") is None:
+                tabela_viab_para_ebitda = raw.get("tabela_viabilidade_financeira")
+                if tabela_viab_para_ebitda:
+                    primeira_tabela = next(iter(tabela_viab_para_ebitda.values()), None)
+                    linhas_tabela = (primeira_tabela or {}).get("linhas") or []
+                    if linhas_tabela:
+                        ultima_linha = linhas_tabela[-1]
+                        margem_ebitda_reconciliada = ultima_linha.get("margem_ebitda_pct")
+                        if margem_ebitda_reconciliada is not None:
+                            raw["ebitda_calculado"] = {
+                                "ebitda_bottom_up_receita_menos_despesas": None,
+                                "ebitda_top_down_lucro_liquido": None,
+                                "diferenca_bottom_vs_top": None,
+                                "margem_ebitda_pct": margem_ebitda_reconciliada,
+                                "fonte": "tabela_viabilidade_financeira_reconciliado",
+                                "nota_reconciliacao": (
+                                    "Valor reconciliado com tabela_viabilidade_financeira "
+                                    "(mesma fonte do Bloco A) — o cálculo fixo antigo "
+                                    "(calcular_ebitda_de_dre) não achou os componentes "
+                                    "necessários nesta DRE, mesmo o Bloco A já tendo "
+                                    "calculado corretamente por outro caminho."
+                                ),
+                            }
             raw["anomalias_detectadas"] = detectar_anomalias_run_rate(
                 dre_linhas_para_contas(primeira_dre), top_n=10
+            )
+        elif dre_hierarquia_aproximada and next(iter(dre_hierarquia_aproximada.values()), {}).get("multi_entidade_ambigua"):
+            # Achado real em 27/08 (deal Irko) — aba com múltiplos blocos
+            # de empresa (holding) e NENHUM bloco "combinado"/"consolidado"
+            # claro pra escolher sozinho (ver `_aplicar_deteccao_multi_empresa`
+            # em dre_balancete_parser.py). Não calcula NADA aqui — sem
+            # isso, cairia no mesmo bug que gerou o resultado errado do
+            # Irko (pegar uma subsidiária isolada como se fosse o total).
+            # `ebitda_calculado=None` explícito é preferível a um número
+            # plausível mas errado: força o `financial_analysis`/
+            # `cfo_synthesis` a tratar isso como bloqueio, não como dado.
+            primeiro_arquivo = next(iter(dre_hierarquia_aproximada.values()))
+            raw["ebitda_calculado"] = None
+            raw["anomalias_detectadas"] = []
+            raw.pop("dre_hierarquia_aproximada", None)
+            raw["dre_hierarquia_nota"] = (
+                "BLOQUEADO: " + primeiro_arquivo["nota"] +
+                " Nenhum EBITDA/margem foi calculado a partir desta DRE — "
+                "trate como dado ausente, não como zero ou não-material."
             )
         elif dre_hierarquia_aproximada:
             # Fallback (25/08) — a DRE existe e foi lida, mas a nomenclatura
@@ -1296,6 +1481,52 @@ def main():
             # deve refletir essa incerteza na análise, não escondê-la.
             primeiro_arquivo = next(iter(dre_hierarquia_aproximada.values()))
             raw["ebitda_calculado"] = primeiro_arquivo["resultado"]
+            # Reconciliação com `tabela_viabilidade_financeira` — achado
+            # testando de ponta a ponta o GATTI: esse "resultado"
+            # (`calcular_resultado_de_hierarquia`, bottom-up genérico)
+            # não tem a correção de convenção de sinal contábil que as 3
+            # funções "finas" já têm (`_corrigir_convencao_sinal_receita`),
+            # nem sempre consegue reconciliar quando a granularidade é
+            # "múltiplas colunas comparativas" — deu margem operacional
+            # de 182%, completamente implausível, mesmo o Bloco A já
+            # tendo calculado 33,43% corretamente pela outra via. Mesma
+            # técnica já usada acima (branch de dre_estruturada) e no job
+            # de extração pra `resultado_calc`: usa
+            # `tabela_viabilidade_financeira` (a mesma fonte que o Bloco A
+            # usa) como reconciliação quando o resultado bottom-up vier
+            # vazio ou fora de uma faixa plausível de margem operacional.
+            margem_op_bottom_up = raw["ebitda_calculado"].get("margem_operacional_pct") if raw["ebitda_calculado"] else None
+            se_precisa_reconciliar = (
+                not raw["ebitda_calculado"]
+                or raw["ebitda_calculado"].get("resultado_operacional_total") is None
+                or margem_op_bottom_up is None
+                or not (-100 <= margem_op_bottom_up <= 85)
+            )
+            if se_precisa_reconciliar:
+                tabela_viab_para_ebitda = raw.get("tabela_viabilidade_financeira")
+                if tabela_viab_para_ebitda:
+                    primeira_tabela = next(iter(tabela_viab_para_ebitda.values()), None)
+                    linhas_tabela = (primeira_tabela or {}).get("linhas") or []
+                    if linhas_tabela:
+                        ultima_linha = linhas_tabela[-1]
+                        margem_ebitda_reconciliada = ultima_linha.get("margem_ebitda_pct")
+                        if margem_ebitda_reconciliada is not None:
+                            raw["ebitda_calculado"] = {
+                                "receita_total": ultima_linha.get("receita_bruta"),
+                                "despesa_total": None,
+                                "resultado_operacional_total": ultima_linha.get("lucro_operacional"),
+                                "ebitda_aproximado": ultima_linha.get("margem_ebitda_rs"),
+                                "margem_operacional_pct": margem_ebitda_reconciliada,
+                                "fonte": "tabela_viabilidade_financeira_reconciliado",
+                                "hierarquia_confiavel": True,
+                                "nota_reconciliacao": (
+                                    "Valor reconciliado com tabela_viabilidade_financeira "
+                                    "(mesma fonte do Bloco A) — o cálculo bottom-up genérico "
+                                    "(calcular_resultado_de_hierarquia) deu um resultado vazio "
+                                    "ou implausível nesta DRE, mesmo o Bloco A já tendo "
+                                    "calculado corretamente por outro caminho."
+                                ),
+                            }
             raw["anomalias_detectadas"] = []  # não calculável sem categorias finas — não inventa
             # Remove a hierarquia BRUTA (todas as raízes, valor por mês —
             # pode ser tão grande quanto a DRE original) depois de já ter
@@ -1435,10 +1666,11 @@ def main():
         "status": "completed",
         "output": output,
         "confidence": output.get("confidence"),
+        "started_at": inicio.isoformat(),
+        "input_hash": input_hash,
     }
     if table == "agent_runs":
         row["deal_data_id"] = deal_data["id"]
-        row["input_hash"] = input_hash
     else:
         row["recommendation"] = output.get("recommendation")
 
